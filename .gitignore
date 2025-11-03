@@ -1,2 +1,10 @@
 ﻿node_modules`n.next`n.env`n.env.local`n.DS_Store`nnpm-debug.log*
 node_modules
+
+# build artifacts
+.next
+out
+# deps
+node_modules
+# OS
+.DS_Store
