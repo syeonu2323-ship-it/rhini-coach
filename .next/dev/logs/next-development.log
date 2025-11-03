@@ -1,0 +1,20 @@
+[00:00:00.997] Server  LOG      ✓ Ready in 768ms
+[00:04:38.081] Server  LOG      ✓ Compiled in 48ms
+[00:19:06.518] Server  LOG      ✓ Compiled in 48ms
+[00:24:45.861] Server  LOG      ✓ Compiled in 33ms
+[00:24:45.999] Browser ERROR   ./components/LfaAnalyzer.tsx:384:9
+Parsing ecmascript source code failed
+  382 |     const CONTROL_MIN = preset.CONTROL_MIN;
+  383 |     const TEST_MIN_ABS = preset.TEST_MIN_ABS;
+> 384 |     the const TEST_MIN_REL = preset.TEST_MIN_REL;
+      |         ^^^^^
+  385 |     const MIN_AREA_FRAC = preset.MIN_AREA_FRAC;
+  386 |
+  387 |     let verdict: Verdict = "Invalid";
+
+Expected ';', '}' or <eof>
+
+Import trace:
+  Server Component:
+    ./components/LfaAnalyzer.tsx
+    ./app/analyze/page.tsx

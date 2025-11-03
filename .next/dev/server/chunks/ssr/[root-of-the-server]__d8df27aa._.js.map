@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 18, "column": 0}, "map": {"version":3,"sources":["file:///Users/yeo_nu/rhini-coach/app/analyze/page.tsx"],"sourcesContent":["// app/analyze/page.tsx\nimport dynamic from 'next/dynamic';\n\n// LfaAnalyzer는 브라우저에서만 작동해야 하니까 SSR을 꺼야 함\nconst LfaAnalyzer = dynamic(() => import('../../components/LfaAnalyzer'), { ssr: false });\n\nexport default function AnalyzePage() {\n  return (\n    <main className=\"min-h-screen p-6\">\n      <LfaAnalyzer />\n    </main>\n  );\n}\n\n"],"names":[],"mappings":"AAAA,uBAAuB;;;;;;AACvB;;;;AAEA,0CAA0C;AAC1C,MAAM,cAAc,IAAA,0KAAO,EAAC;;;;;;IAAgD,KAAK;;AAElE,SAAS;IACtB,qBACE,8OAAC;QAAK,WAAU;kBACd,cAAA,8OAAC;;;;;;;;;;AAGP","debugId":null}}]
+}
