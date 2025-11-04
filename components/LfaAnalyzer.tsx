@@ -1,10 +1,10 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/** LFA QuickCheck v4.6-w2 (Speed + Logo-guard)
- * - 2단계 각도 탐색(거친 → 정밀) + 프로필 서브샘플링으로 속도 개선
- * - 고채도(로고/컬러) 마스킹 + 밝기기반 라인점수로 오검출 방지
- * - 기존 UI/옵션/판정 기준은 동일 유지
+/** LFA QuickCheck v4.6-w3 (ROI crop + speed + logo-guard)
+ * - 수동 ROI 드래그-자르기: 지정 영역만 분석
+ * - 프리뷰 각도탐색/다운스케일/서브샘플로 성능 보장
+ * - 고채도(로고) 마스킹 + 밝기기반 라인점수
  */
 
 // ---------- types ----------
@@ -13,7 +13,6 @@ type Sensitivity = "sensitive" | "balanced" | "conservative";
 type ControlPos = "auto" | "left" | "right" | "top" | "bottom";
 type Mode = "auto" | "manual";
 type Peak = { idx: number; z: number; width: number; area: number };
-
 type AnalyzeResult =
   | { ok: true; result: { verdict: Verdict; detail: string; confidence: "확실" | "보통" | "약함" } }
   | { ok: false; reason?: "nopeaks" | string; rect?: unknown; axis?: "x" | "y" };
@@ -23,26 +22,21 @@ const PRESETS: Record<Sensitivity, {
   CONTROL_MIN: number; TEST_MIN_ABS: number; TEST_MIN_REL: number;
   MAX_WIDTH_FRAC: number; MIN_SEP_FRAC: number; MAX_SEP_FRAC: number; MIN_AREA_FRAC: number;
 }> = {
-  sensitive:   { CONTROL_MIN: 1.2, TEST_MIN_ABS: 0.95, TEST_MIN_REL: 0.30, MAX_WIDTH_FRAC: 0.16, MIN_SEP_FRAC: 0.04, MAX_SEP_FRAC: 0.80, MIN_AREA_FRAC: 0.14 },
+  sensitive:   { CONTROL_MIN: 1.2,  TEST_MIN_ABS: 0.95, TEST_MIN_REL: 0.30, MAX_WIDTH_FRAC: 0.16, MIN_SEP_FRAC: 0.04, MAX_SEP_FRAC: 0.80, MIN_AREA_FRAC: 0.14 },
   balanced:    { CONTROL_MIN: 1.45, TEST_MIN_ABS: 1.10, TEST_MIN_REL: 0.40, MAX_WIDTH_FRAC: 0.12, MIN_SEP_FRAC: 0.05, MAX_SEP_FRAC: 0.70, MIN_AREA_FRAC: 0.24 },
-  conservative:{ CONTROL_MIN: 1.7, TEST_MIN_ABS: 1.35, TEST_MIN_REL: 0.55, MAX_WIDTH_FRAC: 0.10, MIN_SEP_FRAC: 0.06, MAX_SEP_FRAC: 0.60, MIN_AREA_FRAC: 0.34 },
+  conservative:{ CONTROL_MIN: 1.7,  TEST_MIN_ABS: 1.35, TEST_MIN_REL: 0.55, MAX_WIDTH_FRAC: 0.10, MIN_SEP_FRAC: 0.06, MAX_SEP_FRAC: 0.60, MIN_AREA_FRAC: 0.34 },
 };
 
-// -----------------------------
-//   플랫폼별 퍼포먼스 가드
-// -----------------------------
+// ---------- 플랫폼별 퍼포먼스 가드 ----------
 const UA = typeof navigator !== "undefined" ? navigator.userAgent : "";
 const IS_WINDOWS = /Windows/i.test(UA);
 const PERF = {
-  previewMaxDim: IS_WINDOWS ? 240 : 300,   // 각도 탐색 프리뷰 크기 ↓
-  fullMaxDim:    IS_WINDOWS ? 920  : 1300, // 본처리 다운스케일 상한 ↓
+  previewMaxDim: IS_WINDOWS ? 240 : 300,
+  fullMaxDim:    IS_WINDOWS ? 920  : 1300,
   edgeSample:    IS_WINDOWS ? 4    : 3,
-  profileStride: IS_WINDOWS ? 2    : 1,    // 프로필 계산 서브샘플
+  profileStride: IS_WINDOWS ? 2    : 1,
 };
 
-// -----------------------------
-//   유틸
-// -----------------------------
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const idle = (ms = 0) =>
   new Promise<void>((res) => {
@@ -65,7 +59,7 @@ const quantile = (arr: number[] | Float32Array, q: number) => {
   return s[Math.floor((s.length - 1) * q)];
 };
 
-// 이미지 로드 & 스케일
+// ---------- 이미지 로드/회전 ----------
 async function loadScaledBitmap(fileOrImg: File | HTMLImageElement, maxDim = 1400) {
   let src: HTMLImageElement;
   if (fileOrImg instanceof File) {
@@ -85,77 +79,55 @@ async function loadScaledBitmap(fileOrImg: File | HTMLImageElement, maxDim = 140
   return { bitmap: c, width: tw, height: th };
 }
 
-// 2단계 각도 탐색: 거친 스캔 → 근처 정밀
 async function getBestRotationAngleFromPreview(img: HTMLImageElement) {
   const { bitmap, width, height } = await loadScaledBitmap(img, PERF.previewMaxDim);
-
   const energyFor = (canvas: HTMLCanvasElement) => {
-    const ctx = canvas.getContext("2d")!;
-    const { width: w, height: h } = canvas;
-    const data = ctx.getImageData(0, 0, w, h).data;
-    let e = 0;
-    for (let y = 1; y < h - 1; y += PERF.edgeSample) {
-      for (let x = 1; x < w - 1; x += PERF.edgeSample) {
-        const i = (y * w + x) * 4;
-        const gx = (data[i + 4] - data[i - 4]);
-        const gy = (data[i + 4 * w] - data[i - 4 * w]);
-        const g  = data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
-        e += Math.abs(gx) + Math.abs(gy) + g * 0.001;
-      }
-    }
-    return e / (w * h);
+    const ctx = canvas.getContext("2d")!; const { width: w, height: h } = canvas;
+    const data = ctx.getImageData(0, 0, w, h).data; let e = 0;
+    for (let y = 1; y < h - 1; y += PERF.edgeSample) for (let x = 1; x < w - 1; x += PERF.edgeSample) {
+      const i = (y * w + x) * 4;
+      const gx = (data[i + 4] - data[i - 4]); const gy = (data[i + 4 * w] - data[i - 4 * w]);
+      const g  = data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
+      e += Math.abs(gx) + Math.abs(gy) + g * 0.001;
+    } return e / (w * h);
   };
   const draw = (deg: number) => {
-    const rad = (deg * Math.PI) / 180;
-    const w = width, h = height;
+    const rad = (deg * Math.PI) / 180, w = width, h = height;
     const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
     const rw = Math.round(w * cos + h * sin), rh = Math.round(w * sin + h * cos);
     const rot = document.createElement("canvas"); rot.width = rw; rot.height = rh;
-    const rctx = rot.getContext("2d")!;
-    rctx.translate(rw / 2, rh / 2); rctx.rotate(rad); rctx.drawImage(bitmap as any, -w / 2, -h / 2);
+    const rctx = rot.getContext("2d")!; rctx.translate(rw / 2, rh / 2); rctx.rotate(rad); rctx.drawImage(bitmap as any, -w / 2, -h / 2);
     return rot;
   };
-
   const coarse = [-24, -12, -6, 0, 6, 12, 24];
   let bestA = 0, bestE = -Infinity;
-  for (let i = 0; i < coarse.length; i++) {
-    if (i % 2 === 0) await idle(0);
-    const a = coarse[i], e = energyFor(draw(a));
-    if (e > bestE) { bestE = e; bestA = a; }
-  }
-
-  // 정밀 탐색(±6도 범위, 2도 간격)
-  const fine: number[] = [];
-  for (let a = bestA - 6; a <= bestA + 6; a += 2) fine.push(a);
-  for (let i = 0; i < fine.length; i++) {
-    if (i % 2 === 0) await idle(0);
-    const a = fine[i], e = energyFor(draw(a));
-    if (e > bestE) { bestE = e; bestA = a; }
-  }
+  for (let i = 0; i < coarse.length; i++) { if (i % 2 === 0) await idle(0); const a = coarse[i], e = energyFor(draw(a)); if (e > bestE) { bestE = e; bestA = a; } }
+  const fine: number[] = []; for (let a = bestA - 6; a <= bestA + 6; a += 2) fine.push(a);
+  for (let i = 0; i < fine.length; i++) { if (i % 2 === 0) await idle(0); const a = fine[i], e = energyFor(draw(a)); if (e > bestE) { bestE = e; bestA = a; } }
   return bestA;
 }
 
-// 본처리 회전 1회 (다운스케일 포함)
 function drawRotatedOnceFull(img: HTMLImageElement, deg: number) {
   const sw = img.naturalWidth || img.width, sh = img.naturalHeight || img.height;
   const scale = Math.min(1, PERF.fullMaxDim / Math.max(sw, sh));
   const base = document.createElement("canvas");
   base.width = Math.round(sw * scale); base.height = Math.round(sh * scale);
-  const bctx = base.getContext("2d")!; bctx.drawImage(img, 0, 0, base.width, base.height);
-
-  const rad = (deg * Math.PI) / 180;
-  const w = base.width, h = base.height;
+  base.getContext("2d")!.drawImage(img, 0, 0, base.width, base.height);
+  const rad = (deg * Math.PI) / 180, w = base.width, h = base.height;
   const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
   const rw = Math.round(w * cos + h * sin), rh = Math.round(w * sin + h * cos);
   const rot = document.createElement("canvas"); rot.width = rw; rot.height = rh;
-  const rctx = rot.getContext("2d")!;
-  rctx.translate(rw / 2, rh / 2); rctx.rotate(rad); rctx.drawImage(base, -w / 2, -h / 2);
+  const rctx = rot.getContext("2d")!; rctx.translate(rw / 2, rh / 2); rctx.rotate(rad); rctx.drawImage(base, -w / 2, -h / 2);
   return rot;
 }
 
-// -----------------------------
-//   근처 찾기/증상 로직 (변경 없음)
-// -----------------------------
+function cropCanvas(src: HTMLCanvasElement, x: number, y: number, w: number, h: number) {
+  const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h));
+  const ctx = c.getContext("2d")!; ctx.drawImage(src, x, y, w, h, 0, 0, c.width, c.height);
+  return c;
+}
+
+// ---------- 근처 찾기/증상(기존 유지) ----------
 function useGeo() {
   const [lat, setLat] = useState<number | null>(null);
   const [lng, setLng] = useState<number | null>(null);
@@ -206,7 +178,7 @@ const NearbyFinder = ({ compact = false }: { compact?: boolean }) => {
   );
 };
 
-// 증상/로그 (기존 그대로)
+// 증상/로그
 type SymptomInsight = { otc: string[]; depts: string[]; redFlags: string[]; notes?: string[]; };
 function analyzeSymptoms(text: string): SymptomInsight {
   const t = (text || "").toLowerCase(); const hit = (re: RegExp) => re.test(t);
@@ -299,9 +271,118 @@ const NegativeAdvice = ({ again }: { again?: () => void }) => {
   );
 };
 
-// -----------------------------
-//   메인: 이미지 판독 + 보조 패널
-// -----------------------------
+// ---------- ROI 분석용 내부 로직 ----------
+function findWindowRect(c: HTMLCanvasElement) {
+  const ctx = c.getContext("2d"); if (!ctx) throw new Error("Canvas context missing");
+  const { width: w, height: h } = c;
+  const img = ctx.getImageData(0, 0, w, h); const data = img.data;
+
+  const br = new Float32Array(w * h);
+  const sat = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4, R = data[i], G = data[i + 1], B = data[i + 2];
+    const max = Math.max(R, G, B), min = Math.min(R, G, B);
+    br[y * w + x]  = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+    sat[y * w + x] = max === 0 ? 0 : (max - min) / max;
+  }
+  const col = new Float32Array(w), row = new Float32Array(h);
+  for (let x = 0; x < w; x++) { let s = 0; for (let y = 0; y < h; y++) s += br[y * w + x]; col[x] = s / h; }
+  for (let y = 0; y < h; y++) { let s = 0; for (let x = 0; x < w; x++) s += br[y * w + x]; row[y] = s / w; }
+
+  const dcol = movingAverage(Array.from(col).map((v, i) => (i ? Math.abs(v - col[i - 1]) : 0)), Math.max(9, Math.floor(w / 40)));
+  const drow = movingAverage(Array.from(row).map((v, i) => (i ? Math.abs(v - row[i - 1]) : 0)), Math.max(9, Math.floor(h / 40)));
+
+  const thx = quantile(dcol, 0.9), thy = quantile(drow, 0.9);
+  const xs: number[] = []; for (let i = 1; i < w - 1; i++) if (dcol[i] > thx && dcol[i] >= dcol[i - 1] && dcol[i] > dcol[i + 1]) xs.push(i);
+  const ys: number[] = []; for (let i = 1; i < h - 1; i++) if (drow[i] > thy && drow[i] >= drow[i - 1] && drow[i] > drow[i + 1]) ys.push(i);
+
+  const pickPair = (arr: number[], N: number) => {
+    if (arr.length < 2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
+    let L = arr[0], R = arr[arr.length - 1], gap = R - L;
+    for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) { const g = arr[j] - arr[i]; if (g > gap) { gap = g; L = arr[i]; R = arr[j]; } }
+    if (gap < N * 0.2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
+    return [L, R];
+  };
+  let [x0, x1] = pickPair(xs, w), [y0, y1] = pickPair(ys, h);
+  const padX = Math.round((x1 - x0) * 0.03), padY = Math.round((y1 - y0) * 0.05);
+  x0 = clamp(x0 + padX, 0, w - 2); x1 = clamp(x1 - padX, 1, w - 1);
+  y0 = clamp(y0 + padY, 0, h - 2); y1 = clamp(y1 - padY, 1, h - 1);
+
+  const glareMask = new Uint8Array(w * h);
+  const brHi = quantile(br, 0.96), brLo = quantile(br, 0.05);
+  for (let i = 0; i < w * h; i++) {
+    if (br[i] > brHi && sat[i] < 0.12) glareMask[i] = 1;
+    if (br[i] < brLo * 0.6) glareMask[i] = 1;
+    if (sat[i] > 0.28) glareMask[i] = 1; // 고채도(로고) 차단
+  }
+
+  // ROI 대비 스트레치
+  const win: number[] = [];
+  for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
+  const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
+  const a = 255 / Math.max(1, p99 - p1), b = -a * p1;
+  for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) { const k = yy * w + xx; br[k] = clamp(a * br[k] + b, 0, 255); }
+
+  return { x0, x1, y0, y1, glareMask, br, sat, w, h };
+}
+
+function analyzeWindow(rect: { x0: number; x1: number; y0: number; y1: number; glareMask: Uint8Array; br: Float32Array; sat: Float32Array; w: number; h: number }) {
+  const { x0, x1, y0, y1, glareMask, br, sat, w } = rect;
+  let sumWin = 0, cntWin = 0;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (!glareMask[i]) { sumWin += br[i]; cntWin++; } }
+  const meanWin = cntWin ? sumWin / cntWin : 128;
+
+  const stride = Math.max(1, PERF.profileStride);
+
+  const profX: number[] = [];
+  for (let x = x0; x <= x1; x += stride) {
+    let s = 0, cnt = 0;
+    for (let y = y0; y <= y1; y += stride) {
+      const i = y * w + x; if (glareMask[i]) continue;
+      const neutrality = Math.max(0, 1 - sat[i] * 0.9);
+      s += (meanWin - br[i]) * neutrality; cnt++;
+    }
+    profX.push(cnt ? s / cnt : 0);
+  }
+
+  const profY: number[] = [];
+  for (let y = y0; y <= y1; y += stride) {
+    let s = 0, cnt = 0;
+    for (let x = x0; x <= x1; x += stride) {
+      const i = y * w + x; if (glareMask[i]) continue;
+      const neutrality = Math.max(0, 1 - sat[i] * 0.9);
+      s += (meanWin - br[i]) * neutrality; cnt++;
+    }
+    profY.push(cnt ? s / cnt : 0);
+  }
+  return { profX, profY };
+}
+
+function peaksFromProfile(arr: number[]) {
+  const bg = movingAverage(arr, Math.max(11, Math.floor(arr.length / 12)));
+  const detr = arr.map((v, i) => bg[i] - v);
+  const mean = detr.reduce((a, b) => a + b, 0) / Math.max(1, detr.length);
+  const q25 = quantile(detr as any, 0.25), q75 = quantile(detr as any, 0.75);
+  const iqr = Math.max(1e-6, q75 - q25);
+  const sigma = iqr / 1.349;
+  const z = detr.map((v) => (v - mean) / (sigma || 1));
+  const edgeMargin = Math.max(4, Math.floor(arr.length * 0.04));
+  const peaks: Peak[] = [];
+  for (let i = 1; i < z.length - 1; i++) {
+    if (z[i] >= z[i - 1] && z[i] > z[i + 1]) {
+      if (i < edgeMargin || z.length - 1 - i < edgeMargin) continue;
+      const half = z[i] * 0.5; let L = i, R = i, area = z[i];
+      while (L > 0 && z[L] > half) { L--; area += z[L]; }
+      while (R < z.length - 1 && z[R] > half) { R++; area += z[R]; }
+      peaks.push({ idx: i, z: z[i], width: R - L, area });
+    }
+  }
+  peaks.sort((a, b) => b.z - a.z);
+  const quality = (peaks[0]?.z || 0) + 0.8 * (peaks[1]?.z || 0);
+  return { z, peaks, quality };
+}
+
+// ---------- 메인 컴포넌트 ----------
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("auto");
@@ -317,155 +398,55 @@ export default function LfaAnalyzer() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
 
+  // ROI 드래그 상태 (오른쪽 처리결과 캔버스에서 지정)
+  const [roiMode, setRoiMode] = useState(false);
+  const [roi, setRoi] = useState<{x:number;y:number;w:number;h:number} | null>(null);
+  const roiRef = useRef<{x:number;y:number;w:number;h:number} | null>(null);
+  roiRef.current = roi;
+
+  // 수동 가이드(필요시 유지)
   const [guideC, setGuideC] = useState<number | null>(null);
   const [guideT, setGuideT] = useState<number | null>(null);
 
-  // ---------- 윈도(ROI) 찾기 + 프로필 ----------
-  function findWindowRect(c: HTMLCanvasElement) {
-    const ctx = c.getContext("2d"); if (!ctx) throw new Error("Canvas context missing");
-    const { width: w, height: h } = c;
-    const img = ctx.getImageData(0, 0, w, h);
-    const data = img.data;
-
-    const br = new Float32Array(w * h);
-    const sat = new Float32Array(w * h);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = (y * w + x) * 4, R = data[i], G = data[i + 1], B = data[i + 2];
-        const max = Math.max(R, G, B), min = Math.min(R, G, B);
-        br[y * w + x]  = 0.2126 * R + 0.7152 * G + 0.0722 * B;
-        sat[y * w + x] = max === 0 ? 0 : (max - min) / max;
-      }
-    }
-    const col = new Float32Array(w), row = new Float32Array(h);
-    for (let x = 0; x < w; x++) { let s = 0; for (let y = 0; y < h; y++) s += br[y * w + x]; col[x] = s / h; }
-    for (let y = 0; y < h; y++) { let s = 0; for (let x = 0; x < w; x++) s += br[y * w + x]; row[y] = s / w; }
-
-    const dcol = movingAverage(Array.from(col).map((v, i) => (i ? Math.abs(v - col[i - 1]) : 0)), Math.max(9, Math.floor(w / 40)));
-    const drow = movingAverage(Array.from(row).map((v, i) => (i ? Math.abs(v - row[i - 1]) : 0)), Math.max(9, Math.floor(h / 40)));
-
-    const thx = quantile(dcol, 0.9), thy = quantile(drow, 0.9);
-    const xs: number[] = []; for (let i = 1; i < w - 1; i++) if (dcol[i] > thx && dcol[i] >= dcol[i - 1] && dcol[i] > dcol[i + 1]) xs.push(i);
-    const ys: number[] = []; for (let i = 1; i < h - 1; i++) if (drow[i] > thy && drow[i] >= drow[i - 1] && drow[i] > drow[i + 1]) ys.push(i);
-
-    const pickPair = (arr: number[], N: number) => {
-      if (arr.length < 2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
-      let L = arr[0], R = arr[arr.length - 1], gap = R - L;
-      for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
-        const g = arr[j] - arr[i]; if (g > gap) { gap = g; L = arr[i]; R = arr[j]; }
-      }
-      if (gap < N * 0.2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
-      return [L, R];
-    };
-    let [x0, x1] = pickPair(xs, w), [y0, y1] = pickPair(ys, h);
-    const padX = Math.round((x1 - x0) * 0.03), padY = Math.round((y1 - y0) * 0.05);
-    x0 = clamp(x0 + padX, 0, w - 2); x1 = clamp(x1 - padX, 1, w - 1);
-    y0 = clamp(y0 + padY, 0, h - 2); y1 = clamp(y1 - padY, 1, h - 1);
-
-    // glare + shadow + 고채도(로고) 마스크
-    const glareMask = new Uint8Array(w * h);
-    const brHi = quantile(br, 0.96), brLo = quantile(br, 0.05);
-    for (let i = 0; i < w * h; i++) {
-      if (br[i] > brHi && sat[i] < 0.12) glareMask[i] = 1;    // 강한 하이라이트
-      if (br[i] < brLo * 0.6) glareMask[i] = 1;               // 깊은 그림자
-      if (sat[i] > 0.28) glareMask[i] = 1;                    // **고채도 영역(로고/컬러) 차단**
-    }
-
-    // ROI 대비 스트레치 (1~99%)
-    const win: number[] = [];
-    for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
-    const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
-    const a = 255 / Math.max(1, p99 - p1), b = -a * p1;
-    for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) { const k = yy * w + xx; br[k] = clamp(a * br[k] + b, 0, 255); }
-
-    return { x0, x1, y0, y1, glareMask, br, sat, w, h };
-  }
-
-  // 밝기 기반 프로필(어두운 선 + 저채도 가중치), 서브샘플링
-  function analyzeWindow(c: HTMLCanvasElement, rect: { x0: number; x1: number; y0: number; y1: number; glareMask: Uint8Array; br: Float32Array; sat: Float32Array; w: number; h: number }) {
-    const { x0, x1, y0, y1, glareMask, br, sat, w } = rect;
-
-    // 윈도 평균 밝기
-    let sumWin = 0, cntWin = 0;
-    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (!glareMask[i]) { sumWin += br[i]; cntWin++; } }
-    const meanWin = cntWin ? sumWin / cntWin : 128;
-
-    const stride = Math.max(1, PERF.profileStride);
-
-    const profX: number[] = [];
-    for (let x = x0; x <= x1; x += stride) {
-      let s = 0, cnt = 0;
-      for (let y = y0; y <= y1; y += stride) {
-        const i = y * w + x;
-        if (glareMask[i]) continue;
-        // **점수 = (평균밝기 - 픽셀밝기) × (1 - sat*0.9)** → 어두울수록, 덜 컬러일수록 가중
-        const neutrality = Math.max(0, 1 - sat[i] * 0.9);
-        s += (meanWin - br[i]) * neutrality;
-        cnt++;
-      }
-      profX.push(cnt ? s / cnt : 0);
-    }
-
-    const profY: number[] = [];
-    for (let y = y0; y <= y1; y += stride) {
-      let s = 0, cnt = 0;
-      for (let x = x0; x <= x1; x += stride) {
-        const i = y * w + x;
-        if (glareMask[i]) continue;
-        const neutrality = Math.max(0, 1 - sat[i] * 0.9);
-        s += (meanWin - br[i]) * neutrality;
-        cnt++;
-      }
-      profY.push(cnt ? s / cnt : 0);
-    }
-    return { profX, profY, stride };
-  }
-
-  function peaksFromProfile(arr: number[]) {
-    const bg = movingAverage(arr, Math.max(11, Math.floor(arr.length / 12)));
-    const detr = arr.map((v, i) => bg[i] - v);
-    const mean = detr.reduce((a, b) => a + b, 0) / Math.max(1, detr.length);
-    const q25 = quantile(detr as any, 0.25), q75 = quantile(detr as any, 0.75);
-    const iqr = Math.max(1e-6, q75 - q25);
-    const sigma = iqr / 1.349;
-    const z = detr.map((v) => (v - mean) / (sigma || 1));
-    const edgeMargin = Math.max(4, Math.floor(arr.length * 0.04));
-    const peaks: Peak[] = [];
-    for (let i = 1; i < z.length - 1; i++) {
-      if (z[i] >= z[i - 1] && z[i] > z[i + 1]) {
-        if (i < edgeMargin || z.length - 1 - i < edgeMargin) continue;
-        const half = z[i] * 0.5; let L = i, R = i, area = z[i];
-        while (L > 0 && z[L] > half) { L--; area += z[L]; }
-        while (R < z.length - 1 && z[R] > half) { R++; area += z[R]; }
-        peaks.push({ idx: i, z: z[i], width: R - L, area });
-      }
-    }
-    peaks.sort((a, b) => b.z - a.z);
-    const quality = (peaks[0]?.z || 0) + 0.8 * (peaks[1]?.z || 0);
-    return { z, peaks, quality };
-  }
-
-  // ---------- main analyze (async) ----------
+  // ---------- 분석 본체 ----------
   const analyzeOnce = async (forceAxis?: "x" | "y"): Promise<AnalyzeResult> => {
     if (!imgRef.current || !canvasRef.current || !overlayRef.current) return { ok: false, reason: "no canvas/img" };
 
-    // 1) 프리뷰에서 최적 각도 탐색(속도 개선)
+    // 1) 최적 각도
     const img = imgRef.current!;
     const bestAngle = await getBestRotationAngleFromPreview(img);
     setAppliedRotation(bestAngle);
 
-    // 2) 본처리 회전 1회(다운스케일 포함)
-    const bestCanvas = drawRotatedOnceFull(img, bestAngle);
+    // 2) 회전 + 다운스케일
+    let work = drawRotatedOnceFull(img, bestAngle);
 
-    // 3) 베이스 드로우
+    // 2.5) ROI가 있으면 먼저 크롭
+    const r = roiRef.current;
+    if (r && r.w > 12 && r.h > 12) {
+      // ROI는 overlay(화면 좌표)에 그렸으므로 내부 캔버스 픽셀 좌표로 변환 필요
+      // overlay와 out의 크기는 동일(아래에서 out.width/height=work.width/height로 세팅)하므로 그대로 사용 가능
+      work = cropCanvas(work, Math.max(0, Math.round(r.x)), Math.max(0, Math.round(r.y)), Math.round(r.w), Math.round(r.h));
+    }
+
+    // 3) 출력 캔버스 갱신
     const out = canvasRef.current!, octx = out.getContext("2d")!;
-    out.width = bestCanvas.width; out.height = bestCanvas.height; octx.drawImage(bestCanvas, 0, 0);
+    out.width = work.width; out.height = work.height; octx.drawImage(work, 0, 0);
 
-    // 4) ROI & 오버레이
-    const rect = findWindowRect(bestCanvas);
+    // 4) ROI 사각(자동 윈도)
+    const rect = findWindowRect(work);
+
+    // 5) 오버레이(ROI/윈도/라인)
     const overlay = overlayRef.current!, ov = overlay.getContext("2d")!;
     overlay.width = out.width; overlay.height = out.height;
     ov.clearRect(0, 0, overlay.width, overlay.height);
+
+    // ROI 표시
+    if (r && r.w > 12 && r.h > 12) {
+      ov.strokeStyle = "#f59e0b"; ov.lineWidth = 2;
+      ov.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    }
+
+    // 자동 윈도 음영/프레임
     ov.fillStyle = "rgba(0,0,0,0.06)";
     ov.fillRect(0, 0, rect.x0, overlay.height);
     ov.fillRect(rect.x1, 0, overlay.width - rect.x1, overlay.height);
@@ -474,8 +455,8 @@ export default function LfaAnalyzer() {
     ov.strokeStyle = "#22c55e"; ov.lineWidth = 2;
     ov.strokeRect(rect.x0 + 0.5, rect.y0 + 0.5, rect.x1 - rect.x0 - 1, rect.y1 - rect.y0 - 1);
 
-    // 5) 프로필 생성(밝기+저채도 가중, 서브샘플)
-    const { profX, profY } = analyzeWindow(bestCanvas, rect);
+    // 6) 프로필
+    const { profX, profY } = analyzeWindow(rect);
     const px = peaksFromProfile(profX);
     const py = peaksFromProfile(profY);
 
@@ -488,11 +469,21 @@ export default function LfaAnalyzer() {
     }
 
     const sel = axis === "x" ? px : py;
-    const idxToCanvas = (i: number) => (axis === "x" ? rect.x0 + i * PERF.profileStride : rect.y0 + i * PERF.profileStride);
+    const idxToCanvas = (i: number) => (axis === "x" ? rect.x0 + i * Math.max(1, PERF.profileStride) : rect.y0 + i * Math.max(1, PERF.profileStride));
     const peaks = sel.peaks.map((p) => ({ ...p, idx: idxToCanvas(p.idx) }));
 
-    // 6) C/T 선택
-    const preset = PRESETS[sensitivity];
+    // 7) C/T 선택
+    // ROI가 있을 때는 T기준을 아주 약간 완화(라인만 들어오는 경우 약한 T 살리기)
+    const basePreset = PRESETS[sensitivity];
+    const ROI_REL = (roi && roi.w>0 && roi.h>0) ? 0.92 : 1.0;
+    const ROI_AREA = (roi && roi.w>0 && roi.h>0) ? 0.92 : 1.0;
+
+    const preset = {
+      ...basePreset,
+      TEST_MIN_REL: basePreset.TEST_MIN_REL * ROI_REL,
+      MIN_AREA_FRAC: basePreset.MIN_AREA_FRAC * ROI_AREA,
+    };
+
     const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
     const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
     const minSep = Math.round(unit * preset.MIN_SEP_FRAC);
@@ -532,8 +523,8 @@ export default function LfaAnalyzer() {
       else { if (controlPos === "top") tryDir(1); else tryDir(-1); }
     }
 
-    // 7) 판정
-    const { CONTROL_MIN, TEST_MIN_ABS, TEST_MIN_REL, MIN_AREA_FRAC } = PRESETS[sensitivity];
+    // 8) 판정
+    const { CONTROL_MIN, TEST_MIN_ABS, TEST_MIN_REL, MIN_AREA_FRAC } = preset;
     let verdict: Verdict = "Invalid"; let detail = ""; let confidence: "확실" | "보통" | "약함" = "약함";
 
     const decide = (c?: Peak, t?: Peak, loosen = false) => {
@@ -594,7 +585,7 @@ export default function LfaAnalyzer() {
         setResult(out.result);
         saveLog({ ts: Date.now(), text: "", verdict: out.result.verdict });
       } else if (out.reason === "nopeaks") {
-        setResult({ verdict: "Invalid", detail: "스트립을 찾지 못했습니다. 반사/그림자/로고를 줄이고 윈도 영역을 중앙에 맞춰주세요.", confidence: "약함" });
+        setResult({ verdict: "Invalid", detail: "스트립을 찾지 못했습니다. (로고/반사/그림자를 줄이고, 필요 시 영역을 직접 지정해 주세요)", confidence: "약함" });
       } else {
         setResult({ verdict: "Invalid", detail: "처리 실패(알 수 없음). 다른 각도/조명에서 다시 시도해 주세요.", confidence: "약함" });
       }
@@ -607,12 +598,12 @@ export default function LfaAnalyzer() {
   }, [sensitivity, controlPos, requireTwoLines]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 파일 입출력
-  const onPickFile = (f: File) => { setImageUrl(URL.createObjectURL(f)); setResult(null); setGuideC(null); setGuideT(null); };
+  const onPickFile = (f: File) => { setImageUrl(URL.createObjectURL(f)); setResult(null); setGuideC(null); setGuideT(null); setRoi(null); };
   const onInput = (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) onPickFile(f); };
   const stop = (e: React.DragEvent) => e.preventDefault();
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) onPickFile(f); };
 
-  // 자동 분석 트리거
+  // 자동 분석
   useEffect(() => {
     if (!imageUrl) return;
     let cancelled = false;
@@ -620,21 +611,89 @@ export default function LfaAnalyzer() {
     return () => { cancelled = true; };
   }, [imageUrl, analyze]);
 
-  // 수동 클릭: 첫 클릭 C, 두 번째 T
+  // ---------- ROI 드래그 핸들러(오른쪽 overlay 위) ----------
+  useEffect(() => {
+    const ov = overlayRef.current; if (!ov) return;
+    let dragging = false;
+    let startX = 0, startY = 0;
+    let rect = { x: 0, y: 0, w: 0, h: 0 };
+
+    const toCanvasCoord = (e: MouseEvent) => {
+      const r = ov.getBoundingClientRect();
+      const scaleX = ov.width / r.width;
+      const scaleY = ov.height / r.height;
+      const x = Math.round((e.clientX - r.left) * scaleX);
+      const y = Math.round((e.clientY - r.top) * scaleY);
+      return { x: clamp(x, 0, ov.width), y: clamp(y, 0, ov.height) };
+    };
+
+    const onDown = (e: MouseEvent) => {
+      if (!roiMode) return;
+      dragging = true;
+      const c = toCanvasCoord(e);
+      startX = c.x; startY = c.y;
+      rect = { x: startX, y: startY, w: 0, h: 0 };
+      setRoi(null);
+    };
+    const onMove = (e: MouseEvent) => {
+      if (!roiMode || !dragging) return;
+      const c = toCanvasCoord(e);
+      const x0 = Math.min(startX, c.x), y0 = Math.min(startY, c.y);
+      const w = Math.abs(c.x - startX), h = Math.abs(c.y - startY);
+      rect = { x: x0, y: y0, w, h };
+      drawOverlay(rect);
+    };
+    const onUp = () => {
+      if (!roiMode) return;
+      dragging = false;
+      if (rect.w > 10 && rect.h > 10) setRoi(rect);
+      else setRoi(null);
+      drawOverlay(rect); // 최종 그림 유지
+    };
+
+    const drawOverlay = (temp?: {x:number;y:number;w:number;h:number}) => {
+      const ctx = ov.getContext("2d")!;
+      // 기본 오버레이는 analyze에서 다시 그림. ROI 모드 동안은 ROI만 강조해서 덧그림.
+      // analyze가 끝난 후에도 ROI 테두리는 analyzeOnce에서 다시 그려준다.
+      // 여기선 임시박스만 시각화.
+      ctx.save();
+      ctx.clearRect(0, 0, ov.width, ov.height);
+      if (temp && temp.w > 0 && temp.h > 0) {
+        ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(temp.x + 0.5, temp.y + 0.5, temp.w - 1, temp.h - 1);
+      }
+      ctx.restore();
+    };
+
+    ov.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      ov.removeEventListener("mousedown", onDown);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [roiMode]);
+
+  // 수동 클릭(C/T) 가이드(기능 유지, ROI 모드시 비활성화)
   useEffect(() => {
     const o = overlayRef.current; if (!o) return;
     const onClick = (e: MouseEvent) => {
+      if (roiMode) return; // ROI 모드일 땐 클릭은 자르기로만 사용
       if (mode !== "manual") return;
-      const r = o.getBoundingClientRect(); const x = Math.round(e.clientX - r.left);
+      const r = o.getBoundingClientRect();
+      const scaleX = o.width / r.width;
+      const x = Math.round((e.clientX - r.left) * scaleX);
       if (guideC == null) setGuideC(x);
       else if (guideT == null) setGuideT(x);
       else { setGuideC(x); setGuideT(null); }
     };
     o.addEventListener("click", onClick);
     return () => { o.removeEventListener("click", onClick); };
-  }, [mode, guideC, guideT]);
+  }, [mode, guideC, guideT, roiMode]);
 
-  // UI
+  // UI 뱃지
   const VerdictBadge = useMemo(() => {
     if (!result) return null;
     const base = "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-semibold";
@@ -646,9 +705,10 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">📷 LFA QuickCheck v4.6</h1>
-      <p className="text-sm text-gray-600 mb-4">세로 보정·윈도 검출·대비 보정·축 폴백 + 로고가드/고속화</p>
+      <p className="text-sm text-gray-600 mb-4">세로 보정·윈도 검출·대비 보정·축 폴백 + 로고가드/고속화 + ✂️ 수동 자르기</p>
 
-      <div onDrop={onDrop} onDragEnter={stop} onDragOver={stop} className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50">
+      <div onDrop={onDrop} onDragEnter={stop} onDragOver={stop}
+           className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50">
         <label className="w-full cursor-pointer">
           <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onInput} />
           <div className="flex flex-col items-center gap-1">
@@ -666,7 +726,7 @@ export default function LfaAnalyzer() {
 
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-600">모드</label>
-          <select className="px-2 py-1 border rounded-md" value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
+          <select className="px-2 py-1 border rounded-md" value={mode} onChange={(e) => setMode(e.target.value as Mode)} disabled={roiMode}>
             <option value="auto">자동</option>
             <option value="manual">수동(C/T 클릭)</option>
           </select>
@@ -696,9 +756,25 @@ export default function LfaAnalyzer() {
         </label>
 
         {imageUrl && <span className="text-xs text-gray-500">자동 회전: {appliedRotation}°</span>}
+
+        <div className="ml-auto flex items-center gap-2">
+          <label className="flex items-center gap-2 text-xs text-gray-700">
+            <input type="checkbox" checked={roiMode} onChange={(e) => setRoiMode(e.target.checked)} />
+            ✂️ 영역 직접 지정(오른쪽 그림에서 드래그)
+          </label>
+          <button
+            className="px-3 py-1.5 rounded-lg border text-sm disabled:opacity-50"
+            onClick={() => setRoi(null)}
+            disabled={!roi}
+            title="선택 영역 초기화"
+          >
+            선택 해제
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* 좌: 원본 프리뷰 */}
         <div className="relative w-full overflow-hidden rounded-2xl bg-gray-100">
           <div className="aspect-video w-full relative">
             {imageUrl ? (
@@ -710,18 +786,22 @@ export default function LfaAnalyzer() {
           <div className="p-2 text-xs text-gray-500">원본</div>
         </div>
 
+        {/* 우: 처리/ROI/라인 표시 */}
         <div className="relative w-full overflow-hidden rounded-2xl bg-gray-100">
           <div className="aspect-video w-full relative">
             <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-contain" />
-            <canvas ref={overlayRef} className={`absolute inset-0 w-full h-full object-contain ${mode === "manual" ? "cursor-crosshair" : "pointer-events-none"}`} />
+            <canvas
+              ref={overlayRef}
+              className={`absolute inset-0 w-full h-full object-contain ${roiMode ? "cursor-crosshair" : (mode === "manual" ? "cursor-crosshair" : "pointer-events-auto")}`}
+            />
           </div>
-          <div className="p-2 text-xs text-gray-500">처리 결과 {mode === "manual" ? "(수동: 캔버스 클릭해 C/T 지정)" : ""}</div>
+          <div className="p-2 text-xs text-gray-500">처리 결과 {roiMode ? "(드래그로 영역 지정)" : (mode === "manual" ? "(수동: 캔버스 클릭해 C/T 지정)" : "")}</div>
         </div>
       </div>
 
       <div className="mt-4 p-4 rounded-2xl border bg-white">
         <div className="flex items-center gap-3 mb-1"><span className="text-base font-semibold">판독 결과</span>{VerdictBadge}</div>
-        <div className="text-sm text-gray-700">{result ? `${result.detail} · 신뢰도: ${result.confidence}` : "사진을 올리면 자동으로 판독합니다."}</div>
+        <div className="text-sm text-gray-700">{result ? `${result.detail} · 신뢰도: ${result.confidence}` : (roiMode ? "오른쪽에서 드래그로 영역을 지정한 뒤 ‘분석’을 눌러주세요." : "사진을 올리면 자동으로 판독합니다.")}</div>
       </div>
 
       {result?.verdict === "Positive" && (<><SymptomLogger defaultVerdict="Positive" /><NearbyFinder /></>)}
