@@ -1,11 +1,10 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/** LFA QuickCheck v4.6-w (Windows freeze fix)
- * - 기존 기능 유지
- * - 대용량 사진 업로드 시 프리즈 해결:
- *   1) 각도 탐색은 저해상도 프리뷰에서만 수행(메인 스레드 양보)
- *   2) 본처리 회전은 1회만, Windows에선 해상도 상한을 더 낮춤
+/** LFA QuickCheck v4.6-w2 (Speed + Logo-guard)
+ * - 2단계 각도 탐색(거친 → 정밀) + 프로필 서브샘플링으로 속도 개선
+ * - 고채도(로고/컬러) 마스킹 + 밝기기반 라인점수로 오검출 방지
+ * - 기존 UI/옵션/판정 기준은 동일 유지
  */
 
 // ---------- types ----------
@@ -16,33 +15,17 @@ type Mode = "auto" | "manual";
 type Peak = { idx: number; z: number; width: number; area: number };
 
 type AnalyzeResult =
-  | {
-      ok: true;
-      result: { verdict: Verdict; detail: string; confidence: "확실" | "보통" | "약함" };
-    }
-  | {
-      ok: false;
-      reason?: "nopeaks" | string;
-      rect?: unknown;
-      axis?: "x" | "y";
-    };
+  | { ok: true; result: { verdict: Verdict; detail: string; confidence: "확실" | "보통" | "약함" } }
+  | { ok: false; reason?: "nopeaks" | string; rect?: unknown; axis?: "x" | "y" };
 
 // ---------- 판정 프리셋 ----------
-const PRESETS: Record<
-  Sensitivity,
-  {
-    CONTROL_MIN: number;
-    TEST_MIN_ABS: number;
-    TEST_MIN_REL: number;
-    MAX_WIDTH_FRAC: number;
-    MIN_SEP_FRAC: number;
-    MAX_SEP_FRAC: number;
-    MIN_AREA_FRAC: number;
-  }
-> = {
-  sensitive: { CONTROL_MIN: 1.2, TEST_MIN_ABS: 0.95, TEST_MIN_REL: 0.3, MAX_WIDTH_FRAC: 0.16, MIN_SEP_FRAC: 0.04, MAX_SEP_FRAC: 0.8, MIN_AREA_FRAC: 0.14 },
-  balanced: { CONTROL_MIN: 1.45, TEST_MIN_ABS: 1.1, TEST_MIN_REL: 0.4, MAX_WIDTH_FRAC: 0.12, MIN_SEP_FRAC: 0.05, MAX_SEP_FRAC: 0.7, MIN_AREA_FRAC: 0.24 },
-  conservative: { CONTROL_MIN: 1.7, TEST_MIN_ABS: 1.35, TEST_MIN_REL: 0.55, MAX_WIDTH_FRAC: 0.1, MIN_SEP_FRAC: 0.06, MAX_SEP_FRAC: 0.6, MIN_AREA_FRAC: 0.34 },
+const PRESETS: Record<Sensitivity, {
+  CONTROL_MIN: number; TEST_MIN_ABS: number; TEST_MIN_REL: number;
+  MAX_WIDTH_FRAC: number; MIN_SEP_FRAC: number; MAX_SEP_FRAC: number; MIN_AREA_FRAC: number;
+}> = {
+  sensitive:   { CONTROL_MIN: 1.2, TEST_MIN_ABS: 0.95, TEST_MIN_REL: 0.30, MAX_WIDTH_FRAC: 0.16, MIN_SEP_FRAC: 0.04, MAX_SEP_FRAC: 0.80, MIN_AREA_FRAC: 0.14 },
+  balanced:    { CONTROL_MIN: 1.45, TEST_MIN_ABS: 1.10, TEST_MIN_REL: 0.40, MAX_WIDTH_FRAC: 0.12, MIN_SEP_FRAC: 0.05, MAX_SEP_FRAC: 0.70, MIN_AREA_FRAC: 0.24 },
+  conservative:{ CONTROL_MIN: 1.7, TEST_MIN_ABS: 1.35, TEST_MIN_REL: 0.55, MAX_WIDTH_FRAC: 0.10, MIN_SEP_FRAC: 0.06, MAX_SEP_FRAC: 0.60, MIN_AREA_FRAC: 0.34 },
 };
 
 // -----------------------------
@@ -51,34 +34,26 @@ const PRESETS: Record<
 const UA = typeof navigator !== "undefined" ? navigator.userAgent : "";
 const IS_WINDOWS = /Windows/i.test(UA);
 const PERF = {
-  previewMaxDim: IS_WINDOWS ? 260 : 320,   // 각도 탐색용 프리뷰 크기
-  fullMaxDim:    IS_WINDOWS ? 1024 : 1400, // 본처리 다운스케일 상한
-  angle:         IS_WINDOWS ? { start: -25, end: 25, step: 5 } : { start: -30, end: 30, step: 3 },
-  edgeSample:    IS_WINDOWS ? 4 : 3,       // edgeEnergy 샘플링 간격
+  previewMaxDim: IS_WINDOWS ? 240 : 300,   // 각도 탐색 프리뷰 크기 ↓
+  fullMaxDim:    IS_WINDOWS ? 920  : 1300, // 본처리 다운스케일 상한 ↓
+  edgeSample:    IS_WINDOWS ? 4    : 3,
+  profileStride: IS_WINDOWS ? 2    : 1,    // 프로필 계산 서브샘플
 };
 
 // -----------------------------
-//   공통 유틸
+//   유틸
 // -----------------------------
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const idle = (ms = 0) =>
   new Promise<void>((res) => {
     // @ts-ignore
     const ric = typeof requestIdleCallback === "function" ? requestIdleCallback : null;
-    if (ric) {
-      // @ts-ignore
-      ric(() => setTimeout(res, ms));
-    } else {
-      requestAnimationFrame(() => setTimeout(res, ms));
-    }
+    if (ric) { /* @ts-ignore */ ric(() => setTimeout(res, ms)); }
+    else requestAnimationFrame(() => setTimeout(res, ms));
   });
-
 const movingAverage = (a: number[], w: number) => {
-  const h = Math.floor(w / 2),
-    o = new Array(a.length).fill(0);
-  for (let i = 0; i < a.length; i++) {
-    let s = 0,
-      c = 0;
+  const h = Math.floor(w / 2), o = new Array(a.length).fill(0);
+  for (let i = 0; i < a.length; i++) { let s = 0, c = 0;
     for (let j = i - h; j <= i + h; j++) if (j >= 0 && j < a.length) { s += a[j]; c++; }
     o[i] = c ? s / c : 0;
   }
@@ -90,45 +65,29 @@ const quantile = (arr: number[] | Float32Array, q: number) => {
   return s[Math.floor((s.length - 1) * q)];
 };
 
-// 안전한 다운스케일 로더(Edge 호환 위해 캔버스로 축소)
+// 이미지 로드 & 스케일
 async function loadScaledBitmap(fileOrImg: File | HTMLImageElement, maxDim = 1400) {
   let src: HTMLImageElement;
   if (fileOrImg instanceof File) {
     const url = URL.createObjectURL(fileOrImg);
-    src = new Image();
-    (src as any).decoding = "async";
-    src.src = url;
+    src = new Image(); (src as any).decoding = "async"; src.src = url;
     await new Promise((r, j) => { src.onload = () => r(null); (src.onerror as any) = j; });
   } else {
     src = fileOrImg;
     if ("decode" in src) { try { await (src as any).decode(); } catch {} }
   }
-
-  const sw = src.naturalWidth || src.width;
-  const sh = src.naturalHeight || src.height;
+  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
   const scale = Math.min(1, maxDim / Math.max(sw, sh));
-  const tw = Math.max(1, Math.round(sw * scale));
-  const th = Math.max(1, Math.round(sh * scale));
-
-  const c = document.createElement("canvas");
-  c.width = tw; c.height = th;
-  const ctx = c.getContext("2d")!;
-  ctx.imageSmoothingEnabled = true;
-  (ctx as any).imageSmoothingQuality = "high";
+  const tw = Math.max(1, Math.round(sw * scale)), th = Math.max(1, Math.round(sh * scale));
+  const c = document.createElement("canvas"); c.width = tw; c.height = th;
+  const ctx = c.getContext("2d")!; ctx.imageSmoothingEnabled = true; (ctx as any).imageSmoothingQuality = "high";
   ctx.drawImage(src, 0, 0, tw, th);
-
-  return {
-    bitmap: c, width: tw, height: th,
-    revoke: () => { if (fileOrImg instanceof File) try { URL.revokeObjectURL((src as any).src); } catch {} }
-  };
+  return { bitmap: c, width: tw, height: th };
 }
 
-// 프리뷰 회전 스캔(프리즈 방지용, 중간중간 양보)
+// 2단계 각도 탐색: 거친 스캔 → 근처 정밀
 async function getBestRotationAngleFromPreview(img: HTMLImageElement) {
   const { bitmap, width, height } = await loadScaledBitmap(img, PERF.previewMaxDim);
-
-  const angles: number[] = [];
-  for (let a = PERF.angle.start; a <= PERF.angle.end; a += PERF.angle.step) angles.push(a);
 
   const energyFor = (canvas: HTMLCanvasElement) => {
     const ctx = canvas.getContext("2d")!;
@@ -146,110 +105,86 @@ async function getBestRotationAngleFromPreview(img: HTMLImageElement) {
     }
     return e / (w * h);
   };
-
   const draw = (deg: number) => {
     const rad = (deg * Math.PI) / 180;
     const w = width, h = height;
     const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
     const rw = Math.round(w * cos + h * sin), rh = Math.round(w * sin + h * cos);
-    const rot = document.createElement("canvas");
-    rot.width = rw; rot.height = rh;
+    const rot = document.createElement("canvas"); rot.width = rw; rot.height = rh;
     const rctx = rot.getContext("2d")!;
-    rctx.translate(rw / 2, rh / 2); rctx.rotate(rad);
-    rctx.drawImage(bitmap as any, -w / 2, -h / 2);
+    rctx.translate(rw / 2, rh / 2); rctx.rotate(rad); rctx.drawImage(bitmap as any, -w / 2, -h / 2);
     return rot;
   };
 
+  const coarse = [-24, -12, -6, 0, 6, 12, 24];
   let bestA = 0, bestE = -Infinity;
-  for (let i = 0; i < angles.length; i++) {
-    if (i % 2 === 0) await idle(0); // 2번마다 메인 스레드 양보
-    const a = angles[i];
-    const c = draw(a);
-    const e = energyFor(c);
+  for (let i = 0; i < coarse.length; i++) {
+    if (i % 2 === 0) await idle(0);
+    const a = coarse[i], e = energyFor(draw(a));
+    if (e > bestE) { bestE = e; bestA = a; }
+  }
+
+  // 정밀 탐색(±6도 범위, 2도 간격)
+  const fine: number[] = [];
+  for (let a = bestA - 6; a <= bestA + 6; a += 2) fine.push(a);
+  for (let i = 0; i < fine.length; i++) {
+    if (i % 2 === 0) await idle(0);
+    const a = fine[i], e = energyFor(draw(a));
     if (e > bestE) { bestE = e; bestA = a; }
   }
   return bestA;
 }
 
-// 본처리 회전은 1회만(Windows는 1024px 상한)
+// 본처리 회전 1회 (다운스케일 포함)
 function drawRotatedOnceFull(img: HTMLImageElement, deg: number) {
-  const sw = img.naturalWidth || img.width;
-  const sh = img.naturalHeight || img.height;
+  const sw = img.naturalWidth || img.width, sh = img.naturalHeight || img.height;
   const scale = Math.min(1, PERF.fullMaxDim / Math.max(sw, sh));
   const base = document.createElement("canvas");
-  base.width = Math.round(sw * scale);
-  base.height = Math.round(sh * scale);
-  const bctx = base.getContext("2d")!;
-  bctx.drawImage(img, 0, 0, base.width, base.height);
+  base.width = Math.round(sw * scale); base.height = Math.round(sh * scale);
+  const bctx = base.getContext("2d")!; bctx.drawImage(img, 0, 0, base.width, base.height);
 
   const rad = (deg * Math.PI) / 180;
   const w = base.width, h = base.height;
   const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
   const rw = Math.round(w * cos + h * sin), rh = Math.round(w * sin + h * cos);
-  const rot = document.createElement("canvas");
-  rot.width = rw; rot.height = rh;
+  const rot = document.createElement("canvas"); rot.width = rw; rot.height = rh;
   const rctx = rot.getContext("2d")!;
   rctx.translate(rw / 2, rh / 2); rctx.rotate(rad); rctx.drawImage(base, -w / 2, -h / 2);
   return rot;
 }
 
 // -----------------------------
-//   내 위치 기반 약국/병원 찾기
+//   근처 찾기/증상 로직 (변경 없음)
 // -----------------------------
 function useGeo() {
   const [lat, setLat] = useState<number | null>(null);
   const [lng, setLng] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-
   const request = useCallback(() => {
-    if (!navigator.geolocation) {
-      setErr("이 브라우저에서는 위치 기능을 지원하지 않습니다.");
-      return;
-    }
-    setLoading(true);
-    setErr(null);
+    if (!navigator.geolocation) { setErr("이 브라우저에서는 위치 기능을 지원하지 않습니다."); return; }
+    setLoading(true); setErr(null);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setLat(pos.coords.latitude);
-        setLng(pos.coords.longitude);
-        setLoading(false);
-      },
-      (e) => {
-        setErr(e.message || "위치 정보를 가져오지 못했습니다.");
-        setLoading(false);
-      },
+      (pos) => { setLat(pos.coords.latitude); setLng(pos.coords.longitude); setLoading(false); },
+      (e) => { setErr(e.message || "위치 정보를 가져오지 못했습니다."); setLoading(false); },
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
     );
   }, []);
-
   return { lat, lng, loading, err, request };
 }
 function naverSearchUrl(q: string, lat?: number | null, lng?: number | null) {
   const query = encodeURIComponent(q);
-  if (lat != null && lng != null) {
-    const c = `${lng},${lat},15,0,0,0,d`;
-    return `https://map.naver.com/v5/search/${query}?c=${c}`;
-  }
+  if (lat != null && lng != null) { const c = `${lng},${lat},15,0,0,0,d`; return `https://map.naver.com/v5/search/${query}?c=${c}`; }
   return `https://map.naver.com/v5/search/${query}`;
 }
 function kakaoSearchUrl(q: string, lat?: number | null, lng?: number | null) {
   const query = encodeURIComponent(q);
-  if (lat != null && lng != null) {
-    return `https://map.kakao.com/link/search/${query}?x=${lng}&y=${lat}`;
-  }
+  if (lat != null && lng != null) return `https://map.kakao.com/link/search/${query}?x=${lng}&y=${lat}`;
   return `https://map.kakao.com/?q=${query}`;
 }
 const NearbyFinder = ({ compact = false }: { compact?: boolean }) => {
   const { lat, lng, loading, err, request } = useGeo();
-
-  const openBoth = (q: string) => {
-    const naver = naverSearchUrl(q, lat, lng);
-    const kakao = kakaoSearchUrl(q, lat, lng);
-    window.open(naver, "_blank");
-    window.open(kakao, "_blank");
-  };
-
+  const openBoth = (q: string) => { window.open(naverSearchUrl(q, lat, lng), "_blank"); window.open(kakaoSearchUrl(q, lat, lng), "_blank"); };
   return (
     <div className={`mt-4 p-4 rounded-2xl border ${compact ? "bg-white" : "bg-emerald-50 border-emerald-300"}`}>
       <div className="flex items-center gap-2 mb-2">
@@ -261,199 +196,70 @@ const NearbyFinder = ({ compact = false }: { compact?: boolean }) => {
       {err && <div className="text-xs text-red-600 mb-2">위치 오류: {err}</div>}
       {lat && lng && <div className="text-xs text-gray-500 mb-2">내 위치: {lat.toFixed(5)}, {lng.toFixed(5)}</div>}
       <div className="flex flex-wrap gap-2">
-        <button onClick={() => openBoth("약국")} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm">
-          약국 찾기 (네이버/카카오)
-        </button>
-        <button onClick={() => openBoth("이비인후과")} className="px-3 py-1.5 rounded-lg bg-white border text-sm">
-          이비인후과 찾기
-        </button>
-        <button onClick={() => openBoth("호흡기내과")} className="px-3 py-1.5 rounded-lg bg-white border text-sm">
-          호흡기내과 찾기
-        </button>
-        {!compact && (
-          <button onClick={() => openBoth("응급실")} className="px-3 py-1.5 rounded-lg bg-white border text-sm">
-            응급실 찾기
-          </button>
-        )}
+        <button onClick={() => openBoth("약국")} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm">약국 찾기 (네이버/카카오)</button>
+        <button onClick={() => openBoth("이비인후과")} className="px-3 py-1.5 rounded-lg bg-white border text-sm">이비인후과 찾기</button>
+        <button onClick={() => openBoth("호흡기내과")} className="px-3 py-1.5 rounded-lg bg-white border text-sm">호흡기내과 찾기</button>
+        {!compact && <button onClick={() => openBoth("응급실")} className="px-3 py-1.5 rounded-lg bg-white border text-sm">응급실 찾기</button>}
       </div>
-      <p className="mt-2 text-xs text-gray-500">* 새 탭으로 네이버/카카오 지도를 동시에 엽니다. HTTPS에서 위치 권한을 허용해야 정확합니다.</p>
+      <p className="mt-2 text-xs text-gray-500">* HTTPS에서 위치 권한을 허용해야 정확합니다.</p>
     </div>
   );
 };
 
-// -----------------------------
-//   증상 → 약/과추천/주의신호 규칙 + 기록
-// -----------------------------
-type SymptomInsight = {
-  otc: string[];
-  depts: string[];
-  redFlags: string[];
-  notes?: string[];
-};
+// 증상/로그 (기존 그대로)
+type SymptomInsight = { otc: string[]; depts: string[]; redFlags: string[]; notes?: string[]; };
 function analyzeSymptoms(text: string): SymptomInsight {
-  const t = (text || "").toLowerCase();
-  const hit = (re: RegExp) => re.test(t);
+  const t = (text || "").toLowerCase(); const hit = (re: RegExp) => re.test(t);
   const out: SymptomInsight = { otc: [], depts: [], redFlags: [], notes: [] };
-
-  if (hit(/비염|콧물|재채기|코막힘|가려움|알레르/)) {
-    out.otc.push("항히스타민(세티리진, 로라타딘 등)", "비충혈제거제 단기 사용", "식염수 세척");
-    out.depts.push("이비인후과", "알레르기내과");
-    out.notes?.push("수면 장애가 있거나 장기간 지속되면 전문 진료 권장");
-  }
-  if (hit(/발열|열|오한|두통|몸살|근육통|통증/)) {
-    out.otc.push("해열·진통제(아세트아미노펜 등)");
-    out.depts.push("가정의학과", "내과");
-  }
-  if (hit(/기침|가래|호흡곤란|숨참|천명|흉통|가슴 통증/)) {
-    out.otc.push("기침억제제·거담제", "가글/목 스프레이");
-    out.depts.push("호흡기내과", "가정의학과");
-  }
-  if (hit(/인후통|목아픔|목 통증|연하통|침 삼키기/)) {
-    out.otc.push("가글/살균제", "진통제");
-    out.depts.push("이비인후과");
-  }
-  if (hit(/소아|아동|어린이|유아|아이/)) {
-    out.notes?.push("소아는 체중 기반 용량 계산이 필요합니다. 복용 전 약사·의사 상담 권장");
-    if (!out.depts.includes("소아청소년과")) out.depts.push("소아청소년과");
-  }
-  if (hit(/호흡곤란|청색증|숨을 못|의식 저하|경련|탈수|혈담|피 섞인 가래|40도|39도/)) {
-    out.redFlags.push("호흡곤란/청색증/의식변화/고열 지속 등 응급 징후");
-  }
-  if (hit(/흉통|가슴통증/)) out.redFlags.push("흉통 동반 — 즉시 진료 권고");
-  if (hit(/임신|임부|산모/)) out.notes?.push("임신 중에는 일반약 복용 전 반드시 전문 상담 필요");
-
-  out.otc = Array.from(new Set(out.otc));
-  out.depts = Array.from(new Set(out.depts));
-  out.redFlags = Array.from(new Set(out.redFlags));
-  out.notes = Array.from(new Set(out.notes || []));
+  if (hit(/비염|콧물|재채기|코막힘|가려움|알레르/)) { out.otc.push("항히스타민(세티리진, 로라타딘 등)", "비충혈제거제 단기 사용", "식염수 세척"); out.depts.push("이비인후과","알레르기내과"); out.notes?.push("수면 장애/지속 시 전문 진료 권장"); }
+  if (hit(/발열|열|오한|두통|몸살|근육통|통증/)) { out.otc.push("해열·진통제(아세트아미노펜 등)"); out.depts.push("가정의학과","내과"); }
+  if (hit(/기침|가래|호흡곤란|숨참|천명|흉통|가슴 통증/)) { out.otc.push("기침억제제·거담제","가글/목 스프레이"); out.depts.push("호흡기내과","가정의학과"); }
+  if (hit(/인후통|목아픔|연하통/)) { out.otc.push("가글/살균제","진통제"); out.depts.push("이비인후과"); }
+  if (hit(/소아|어린이|유아/)) { out.notes?.push("소아는 체중기반 용량. 복용 전 상담 권장"); if (!out.depts.includes("소아청소년과")) out.depts.push("소아청소년과"); }
+  if (hit(/호흡곤란|청색증|의식 저하|경련|탈수|혈담|40도|39도/)) out.redFlags.push("응급 징후: 호흡곤란/고열 지속/의식 변화 등");
+  if (hit(/흉통|가슴통증/)) out.redFlags.push("흉통 동반 — 즉시 진료");
+  if (hit(/임신|임부|산모/)) out.notes?.push("임신 중엔 일반약 복용 전 반드시 상담");
+  out.otc = Array.from(new Set(out.otc)); out.depts = Array.from(new Set(out.depts)); out.redFlags = Array.from(new Set(out.redFlags)); out.notes = Array.from(new Set(out.notes||[]));
   return out;
 }
 type SymptomLog = { ts: number; text: string; verdict?: Verdict };
 const SYMPTOM_KEY = "lfa_symptom_logs_v1";
-function loadLogs(): SymptomLog[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(SYMPTOM_KEY);
-    return raw ? (JSON.parse(raw) as SymptomLog[]) : [];
-  } catch {
-    return [];
-  }
-}
-function saveLog(entry: SymptomLog) {
-  if (typeof window === "undefined") return;
-  try {
-    const prev = loadLogs();
-    const next = [entry, ...prev].slice(0, 20);
-    localStorage.setItem(SYMPTOM_KEY, JSON.stringify(next));
-  } catch {}
-}
+const loadLogs = (): SymptomLog[] => { if (typeof window === "undefined") return []; try { const raw = localStorage.getItem(SYMPTOM_KEY); return raw ? JSON.parse(raw) : []; } catch { return []; } };
+const saveLog  = (entry: SymptomLog) => { if (typeof window === "undefined") return; try { const prev = loadLogs(); const next = [entry, ...prev].slice(0, 20); localStorage.setItem(SYMPTOM_KEY, JSON.stringify(next)); } catch {} };
 const SymptomLogger = ({ defaultVerdict }: { defaultVerdict?: Verdict }) => {
-  const [symptom, setSymptom] = useState("");
-  const [insight, setInsight] = useState<SymptomInsight | null>(null);
-  const [recent, setRecent] = useState<SymptomLog[]>([]);
-
-  useEffect(() => {
-    setRecent(loadLogs());
-  }, []);
-
-  const handleSubmit = () => {
-    const res = analyzeSymptoms(symptom);
-    setInsight(res);
-    saveLog({ ts: Date.now(), text: symptom, verdict: defaultVerdict });
-    setRecent(loadLogs());
-  };
-
-  const fmt = (ts: number) => {
-    const d = new Date(ts);
-    const pad = (n: number) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  };
-
+  const [symptom, setSymptom] = useState(""); const [insight, setInsight] = useState<SymptomInsight | null>(null); const [recent, setRecent] = useState<SymptomLog[]>([]);
+  useEffect(() => { setRecent(loadLogs()); }, []);
+  const handleSubmit = () => { const res = analyzeSymptoms(symptom); setInsight(res); saveLog({ ts: Date.now(), text: symptom, verdict: defaultVerdict }); setRecent(loadLogs()); };
+  const fmt = (ts: number) => { const d = new Date(ts); const p = (n: number) => n.toString().padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
   return (
     <div className="mt-4 p-4 rounded-2xl border border-rose-300 bg-rose-50">
       <div className="font-semibold text-rose-700 mb-2">🩺 증상 기록 및 맞춤 안내</div>
-      <textarea
-        placeholder="현재 증상을 입력하세요. (예: 콧물, 재채기, 두통, 기침, 목아픔, 소아)"
-        className="w-full p-2 border rounded-md mb-2 text-sm"
-        rows={3}
-        value={symptom}
-        onChange={(e) => setSymptom(e.target.value)}
-      />
-      <button onClick={handleSubmit} className="px-4 py-2 rounded-lg bg-rose-600 text-white text-sm hover:bg-rose-700">
-        맞춤 안내 받기
-      </button>
-
+      <textarea className="w-full p-2 border rounded-md mb-2 text-sm" rows={3} placeholder="예: 콧물, 재채기, 두통, 기침…" value={symptom} onChange={(e) => setSymptom(e.target.value)} />
+      <button onClick={handleSubmit} className="px-4 py-2 rounded-lg bg-rose-600 text-white text-sm hover:bg-rose-700">맞춤 안내 받기</button>
       {insight && (
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="bg-white rounded-xl border p-3 text-sm">
             <div className="font-medium mb-1">💊 추천 일반의약품(카테고리)</div>
-            {insight.otc.length ? (
-              <ul className="list-disc ml-5 space-y-1">
-                {insight.otc.map((x) => (
-                  <li key={x}>{x}</li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-gray-500">입력된 증상으로 추천 항목이 없습니다.</div>
-            )}
+            {insight.otc.length ? <ul className="list-disc ml-5 space-y-1">{insight.otc.map((x) => <li key={x}>{x}</li>)}</ul> : <div className="text-gray-500">입력된 증상으로 추천 항목이 없습니다.</div>}
             <p className="mt-2 text-xs text-gray-500">* 기존 질환/복용약에 따라 적합성이 달라질 수 있어요.</p>
           </div>
-
           <div className="bg-white rounded-xl border p-3 text-sm">
             <div className="font-medium mb-1">🏥 추천 진료과</div>
-            {insight.depts.length ? (
-              <div className="flex flex-wrap gap-1">
-                {insight.depts.map((d) => (
-                  <span key={d} className="px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs">
-                    {d}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <div className="text-gray-500">특정 진료과 추천 없음</div>
-            )}
-            {insight.redFlags.length > 0 && (
-              <div className="mt-2 p-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs">⚠️ 즉시 진료 권고: {insight.redFlags.join(" · ")}</div>
-            )}
-            {insight.notes && insight.notes.length > 0 && (
-              <ul className="mt-2 list-disc ml-5 text-xs text-gray-600 space-y-1">
-                {insight.notes.map((n) => (
-                  <li key={n}>{n}</li>
-                ))}
-              </ul>
-            )}
+            {insight.depts.length ? <div className="flex flex-wrap gap-1">{insight.depts.map((d) => <span key={d} className="px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs">{d}</span>)}</div> : <div className="text-gray-500">특정 진료과 추천 없음</div>}
+            {insight.redFlags.length > 0 && <div className="mt-2 p-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs">⚠️ 즉시 진료 권고: {insight.redFlags.join(" · ")}</div>}
+            {insight.notes && insight.notes.length > 0 && <ul className="mt-2 list-disc ml-5 text-xs text-gray-600 space-y-1">{insight.notes.map((n) => <li key={n}>{n}</li>)}</ul>}
           </div>
-
-          <div className="md:col-span-2">
-            <NearbyFinder compact />
-          </div>
+          <div className="md:col-span-2"><NearbyFinder compact /></div>
         </div>
       )}
-
       {recent.length > 0 && (
         <div className="mt-4 bg-white rounded-xl border p-3">
           <div className="font-medium text-sm mb-2">🗂 최근 기록</div>
           <div className="flex flex-col gap-2 text-xs">
             {recent.slice(0, 6).map((r, i) => (
               <div key={i} className="flex items-start justify-between gap-3">
-                <div className="flex-1">
-                  <div className="text-gray-800">{r.text}</div>
-                  <div className="text-gray-500">{fmt(r.ts)}</div>
-                </div>
-                {r.verdict && (
-                  <span
-                    className={
-                      "px-2 py-0.5 rounded-full " +
-                      (r.verdict === "Positive"
-                        ? "bg-red-100 text-red-700"
-                        : r.verdict === "Negative"
-                        ? "bg-green-100 text-green-700"
-                        : "bg-gray-200 text-gray-700")
-                    }
-                  >
-                    {r.verdict}
-                  </span>
-                )}
+                <div className="flex-1"><div className="text-gray-800">{r.text}</div><div className="text-gray-500">{fmt(r.ts)}</div></div>
+                {r.verdict && <span className={"px-2 py-0.5 rounded-full " + (r.verdict==="Positive"?"bg-red-100 text-red-700":r.verdict==="Negative"?"bg-green-100 text-green-700":"bg-gray-200 text-gray-700")}>{r.verdict}</span>}
               </div>
             ))}
           </div>
@@ -467,46 +273,28 @@ const NegativeAdvice = ({ again }: { again?: () => void }) => {
   const [showSymptom, setShowSymptom] = useState(false);
   return (
     <div className="mt-4 p-4 rounded-2xl border border-slate-300 bg-slate-50">
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-base font-semibold">🧭 음성 가이드</span>
-        <span className="text-xs text-slate-700">이번 판독은 음성입니다.</span>
-      </div>
+      <div className="flex items-center gap-2 mb-2"><span className="text-base font-semibold">🧭 음성 가이드</span><span className="text-xs text-slate-700">이번 판독은 음성입니다.</span></div>
       <ul className="list-disc ml-5 text-sm text-slate-700 space-y-1">
         <li>증상이 없거나 경미하면 경과 관찰만으로 충분할 수 있습니다.</li>
         <li>채취 시점이 너무 이르거나 채취량이 적으면 음성으로 나올 수 있습니다.</li>
         <li>조명·각도·반사 등 이미지 품질 저하도 테스트 라인 인식에 영향을 줄 수 있습니다.</li>
       </ul>
-
       <div className="mt-3 p-3 rounded-xl bg-white border text-sm">
         <div className="font-medium mb-1">🤔 증상이 나타나거나 심해지면</div>
         <ul className="list-disc ml-5 space-y-1">
-          <li>24–48시간 내 유사 조건으로 <b>다시 키트 검사</b>를 권장합니다.</li>
-          <li>재채기·콧물·코막힘 등 뚜렷한 증상이 있으면 간단히 기록해 두세요.</li>
-          <li>호흡곤란, 고열 지속 등 경고 신호 시 <b>의료기관 상담</b>이 우선입니다.</li>
+          <li>24–48시간 내 유사 조건으로 <b>다시 키트 검사</b> 권장</li>
+          <li>증상이 뚜렷하면 간단히 기록해 두기</li>
+          <li>경고 신호 시 <b>의료기관 상담</b> 우선</li>
         </ul>
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          {again && (
-            <button onClick={again} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-sm">
-              다시 분석하기
-            </button>
-          )}
-          <button
-            onClick={() => setShowSymptom(!showSymptom)}
-            className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 text-sm bg-white hover:bg-slate-100"
-          >
+          {again && <button onClick={again} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-sm">다시 분석하기</button>}
+          <button onClick={() => setShowSymptom(!showSymptom)} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 text-sm bg-white hover:bg-slate-100">
             {showSymptom ? "증상 기록 닫기" : "증상 기록 열기"}
           </button>
         </div>
       </div>
-
-      {showSymptom && (
-        <div className="mt-3">
-          <SymptomLogger />
-        </div>
-      )}
-
       <NearbyFinder compact />
-      <p className="mt-2 text-xs text-slate-500">* 이 도구는 참고용입니다. 필요 시 전문가 상담을 권장합니다.</p>
+      <p className="mt-2 text-xs text-slate-500">* 참고용입니다. 필요 시 전문가 상담을 권장합니다.</p>
     </div>
   );
 };
@@ -529,11 +317,10 @@ export default function LfaAnalyzer() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
 
-  // manual guides (reserve for future manual mode enhancement)
   const [guideC, setGuideC] = useState<number | null>(null);
   const [guideT, setGuideT] = useState<number | null>(null);
 
-  // ---------- 윈도우 탐색/분석 로직 (프리즈 방지 버전)
+  // ---------- 윈도(ROI) 찾기 + 프로필 ----------
   function findWindowRect(c: HTMLCanvasElement) {
     const ctx = c.getContext("2d"); if (!ctx) throw new Error("Canvas context missing");
     const { width: w, height: h } = c;
@@ -546,7 +333,7 @@ export default function LfaAnalyzer() {
       for (let x = 0; x < w; x++) {
         const i = (y * w + x) * 4, R = data[i], G = data[i + 1], B = data[i + 2];
         const max = Math.max(R, G, B), min = Math.min(R, G, B);
-        br[y * w + x] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+        br[y * w + x]  = 0.2126 * R + 0.7152 * G + 0.0722 * B;
         sat[y * w + x] = max === 0 ? 0 : (max - min) / max;
       }
     }
@@ -564,11 +351,9 @@ export default function LfaAnalyzer() {
     const pickPair = (arr: number[], N: number) => {
       if (arr.length < 2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
       let L = arr[0], R = arr[arr.length - 1], gap = R - L;
-      for (let i = 0; i < arr.length; i++)
-        for (let j = i + 1; j < arr.length; j++) {
-          const g = arr[j] - arr[i];
-          if (g > gap) { gap = g; L = arr[i]; R = arr[j]; }
-        }
+      for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+        const g = arr[j] - arr[i]; if (g > gap) { gap = g; L = arr[i]; R = arr[j]; }
+      }
       if (gap < N * 0.2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
       return [L, R];
     };
@@ -577,56 +362,63 @@ export default function LfaAnalyzer() {
     x0 = clamp(x0 + padX, 0, w - 2); x1 = clamp(x1 - padX, 1, w - 1);
     y0 = clamp(y0 + padY, 0, h - 2); y1 = clamp(y1 - padY, 1, h - 1);
 
-    // glare/shadow mask
+    // glare + shadow + 고채도(로고) 마스크
     const glareMask = new Uint8Array(w * h);
     const brHi = quantile(br, 0.96), brLo = quantile(br, 0.05);
     for (let i = 0; i < w * h; i++) {
-      if (br[i] > brHi && sat[i] < 0.12) glareMask[i] = 1;
-      if (br[i] < brLo * 0.6) glareMask[i] = 1;
+      if (br[i] > brHi && sat[i] < 0.12) glareMask[i] = 1;    // 강한 하이라이트
+      if (br[i] < brLo * 0.6) glareMask[i] = 1;               // 깊은 그림자
+      if (sat[i] > 0.28) glareMask[i] = 1;                    // **고채도 영역(로고/컬러) 차단**
     }
 
-    // 윈도 영역 대비 보정
+    // ROI 대비 스트레치 (1~99%)
     const win: number[] = [];
     for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
     const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
     const a = 255 / Math.max(1, p99 - p1), b = -a * p1;
     for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) { const k = yy * w + xx; br[k] = clamp(a * br[k] + b, 0, 255); }
 
-    return { x0, x1, y0, y1, glareMask, br };
+    return { x0, x1, y0, y1, glareMask, br, sat, w, h };
   }
 
-  function analyzeWindow(c: HTMLCanvasElement, rect: { x0: number; x1: number; y0: number; y1: number; glareMask: Uint8Array; br: Float32Array }) {
-    const ctx = c.getContext("2d"); if (!ctx) throw new Error("Canvas context missing");
-    const { x0, x1, y0, y1, glareMask } = rect; const w = c.width;
-    const data = ctx.getImageData(0, 0, c.width, c.height).data;
+  // 밝기 기반 프로필(어두운 선 + 저채도 가중치), 서브샘플링
+  function analyzeWindow(c: HTMLCanvasElement, rect: { x0: number; x1: number; y0: number; y1: number; glareMask: Uint8Array; br: Float32Array; sat: Float32Array; w: number; h: number }) {
+    const { x0, x1, y0, y1, glareMask, br, sat, w } = rect;
+
+    // 윈도 평균 밝기
+    let sumWin = 0, cntWin = 0;
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * w + x; if (!glareMask[i]) { sumWin += br[i]; cntWin++; } }
+    const meanWin = cntWin ? sumWin / cntWin : 128;
+
+    const stride = Math.max(1, PERF.profileStride);
 
     const profX: number[] = [];
-    for (let x = x0; x <= x1; x++) {
+    for (let x = x0; x <= x1; x += stride) {
       let s = 0, cnt = 0;
-      for (let y = y0; y <= y1; y++) {
-        const i = y * w + x, ii = i * 4;
+      for (let y = y0; y <= y1; y += stride) {
+        const i = y * w + x;
         if (glareMask[i]) continue;
-        const R = data[ii], G = data[ii + 1], B = data[ii + 2];
-        const sum = R + G + B || 1;
-        const chroma = R / sum - 0.5 * ((G / sum) + (B / sum));
-        s += chroma; cnt++;
+        // **점수 = (평균밝기 - 픽셀밝기) × (1 - sat*0.9)** → 어두울수록, 덜 컬러일수록 가중
+        const neutrality = Math.max(0, 1 - sat[i] * 0.9);
+        s += (meanWin - br[i]) * neutrality;
+        cnt++;
       }
       profX.push(cnt ? s / cnt : 0);
     }
+
     const profY: number[] = [];
-    for (let y = y0; y <= y1; y++) {
+    for (let y = y0; y <= y1; y += stride) {
       let s = 0, cnt = 0;
-      for (let x = x0; x <= x1; x++) {
-        const i = y * w + x, ii = i * 4;
+      for (let x = x0; x <= x1; x += stride) {
+        const i = y * w + x;
         if (glareMask[i]) continue;
-        const R = data[ii], G = data[ii + 1], B = data[ii + 2];
-        const sum = R + G + B || 1;
-        const chroma = R / sum - 0.5 * ((G / sum) + (B / sum));
-        s += chroma; cnt++;
+        const neutrality = Math.max(0, 1 - sat[i] * 0.9);
+        s += (meanWin - br[i]) * neutrality;
+        cnt++;
       }
       profY.push(cnt ? s / cnt : 0);
     }
-    return { profX, profY };
+    return { profX, profY, stride };
   }
 
   function peaksFromProfile(arr: number[]) {
@@ -653,31 +445,26 @@ export default function LfaAnalyzer() {
     return { z, peaks, quality };
   }
 
-  // ---------- main analyze (async)
+  // ---------- main analyze (async) ----------
   const analyzeOnce = async (forceAxis?: "x" | "y"): Promise<AnalyzeResult> => {
     if (!imgRef.current || !canvasRef.current || !overlayRef.current) return { ok: false, reason: "no canvas/img" };
 
-    // 1) 프리뷰에서 최적 각도 탐색(프리즈 방지)
+    // 1) 프리뷰에서 최적 각도 탐색(속도 개선)
     const img = imgRef.current!;
     const bestAngle = await getBestRotationAngleFromPreview(img);
     setAppliedRotation(bestAngle);
 
-    // 2) 본처리 회전 1회(Windows 해상도 상한 적용)
+    // 2) 본처리 회전 1회(다운스케일 포함)
     const bestCanvas = drawRotatedOnceFull(img, bestAngle);
 
-    // 3) draw base
-    const out = canvasRef.current!;
-    const octx = out.getContext("2d")!;
-    out.width = bestCanvas.width;
-    out.height = bestCanvas.height;
-    octx.drawImage(bestCanvas, 0, 0);
+    // 3) 베이스 드로우
+    const out = canvasRef.current!, octx = out.getContext("2d")!;
+    out.width = bestCanvas.width; out.height = bestCanvas.height; octx.drawImage(bestCanvas, 0, 0);
 
-    // 4) window rect
+    // 4) ROI & 오버레이
     const rect = findWindowRect(bestCanvas);
-    const overlay = overlayRef.current!;
-    const ov = overlay.getContext("2d")!;
-    overlay.width = out.width;
-    overlay.height = out.height;
+    const overlay = overlayRef.current!, ov = overlay.getContext("2d")!;
+    overlay.width = out.width; overlay.height = out.height;
     ov.clearRect(0, 0, overlay.width, overlay.height);
     ov.fillStyle = "rgba(0,0,0,0.06)";
     ov.fillRect(0, 0, rect.x0, overlay.height);
@@ -687,7 +474,7 @@ export default function LfaAnalyzer() {
     ov.strokeStyle = "#22c55e"; ov.lineWidth = 2;
     ov.strokeRect(rect.x0 + 0.5, rect.y0 + 0.5, rect.x1 - rect.x0 - 1, rect.y1 - rect.y0 - 1);
 
-    // 5) profiles
+    // 5) 프로필 생성(밝기+저채도 가중, 서브샘플)
     const { profX, profY } = analyzeWindow(bestCanvas, rect);
     const px = peaksFromProfile(profX);
     const py = peaksFromProfile(profY);
@@ -701,10 +488,10 @@ export default function LfaAnalyzer() {
     }
 
     const sel = axis === "x" ? px : py;
-    const idxToCanvas = (i: number) => (axis === "x" ? rect.x0 + i : rect.y0 + i);
+    const idxToCanvas = (i: number) => (axis === "x" ? rect.x0 + i * PERF.profileStride : rect.y0 + i * PERF.profileStride);
     const peaks = sel.peaks.map((p) => ({ ...p, idx: idxToCanvas(p.idx) }));
 
-    // 6) choose control/test
+    // 6) C/T 선택
     const preset = PRESETS[sensitivity];
     const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
     const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
@@ -712,29 +499,17 @@ export default function LfaAnalyzer() {
     const maxSep = Math.round(unit * preset.MAX_SEP_FRAC);
     const valid = peaks.filter((p) => p.width <= maxWidth);
 
-    // debug lines
+    // 디버그 라인
     const ov2 = overlayRef.current!.getContext("2d");
     if (ov2) {
-      ov2.lineWidth = 3;
+      ov2.lineWidth = 3; ov2.strokeStyle = "#8884";
       for (const p of valid) {
-        ov2.strokeStyle = "#8884";
-        if (axis === "x") {
-          ov2.beginPath();
-          ov2.moveTo(p.idx + 0.5, rect.y0 + 2);
-          ov2.lineTo(p.idx + 0.5, rect.y1 - 2);
-          ov2.stroke();
-        } else {
-          ov2.beginPath();
-          ov2.moveTo(rect.x0 + 2, p.idx + 0.5);
-          ov2.lineTo(rect.x1 - 2, p.idx + 0.5);
-          ov2.stroke();
-        }
+        if (axis === "x") { ov2.beginPath(); ov2.moveTo(p.idx + 0.5, rect.y0 + 2); ov2.lineTo(p.idx + 0.5, rect.y1 - 2); ov2.stroke(); }
+        else { ov2.beginPath(); ov2.moveTo(rect.x0 + 2, p.idx + 0.5); ov2.lineTo(rect.x1 - 2, p.idx + 0.5); ov2.stroke(); }
       }
     }
 
-    if (!valid.length) {
-      return { ok: false, reason: "nopeaks", rect, axis };
-    }
+    if (!valid.length) return { ok: false, reason: "nopeaks", rect, axis };
 
     const byPos = [...valid].sort((a, b) => a.idx - b.idx);
     let control: Peak | undefined, test: Peak | undefined;
@@ -757,11 +532,9 @@ export default function LfaAnalyzer() {
       else { if (controlPos === "top") tryDir(1); else tryDir(-1); }
     }
 
-    // 7) verdict
+    // 7) 판정
     const { CONTROL_MIN, TEST_MIN_ABS, TEST_MIN_REL, MIN_AREA_FRAC } = PRESETS[sensitivity];
-    let verdict: Verdict = "Invalid";
-    let detail = "";
-    let confidence: "확실" | "보통" | "약함" = "약함";
+    let verdict: Verdict = "Invalid"; let detail = ""; let confidence: "확실" | "보통" | "약함" = "약함";
 
     const decide = (c?: Peak, t?: Peak, loosen = false) => {
       const cMin = loosen ? CONTROL_MIN * 0.9 : CONTROL_MIN;
@@ -769,18 +542,13 @@ export default function LfaAnalyzer() {
       const relMin = loosen ? TEST_MIN_REL * 0.9 : TEST_MIN_REL;
       const areaFrac = loosen ? MIN_AREA_FRAC * 0.85 : MIN_AREA_FRAC;
 
-      if (!c || c.z < cMin) {
-        verdict = "Invalid"; detail = `컨트롤 라인이 약하거나 인식되지 않았습니다 (C z=${(c?.z ?? 0).toFixed(2)}).`;
-        return;
-      }
-      if (requireTwoLines && !t) {
-        verdict = "Negative"; detail = `음성: 컨트롤만 유효 (C z=${c.z.toFixed(2)})`; confidence = c.z > 2.2 ? "확실" : "보통";
-        return;
-      }
+      if (!c || c.z < cMin) { verdict = "Invalid"; detail = `컨트롤 라인이 약하거나 인식되지 않았습니다 (C z=${(c?.z ?? 0).toFixed(2)}).`; return; }
+      if (requireTwoLines && !t) { verdict = "Negative"; detail = `음성: 컨트롤만 유효 (C z=${c.z.toFixed(2)})`; confidence = c.z > 2.2 ? "확실" : "보통"; return; }
+
       if (t) {
         const areaOK = t.area >= c.area * areaFrac;
-        const absOK = t.z >= absMin;
-        const relOK = t.z >= c.z * relMin;
+        const absOK  = t.z >= absMin;
+        const relOK  = t.z >= c.z * relMin;
         if (areaOK && absOK && relOK) {
           verdict = "Positive";
           detail = `양성: C z=${c.z.toFixed(2)}, T z=${t.z.toFixed(2)} (T/C area ${(t.area / c.area).toFixed(2)})`;
@@ -790,21 +558,17 @@ export default function LfaAnalyzer() {
           detail = `음성: 테스트 라인이 기준 미달 (area:${areaOK ? "ok" : "x"}/abs:${absOK ? "ok" : "x"}/rel:${relOK ? "ok" : "x"})`;
           confidence = absOK || relOK ? "약함" : "확실";
         }
-      } else {
-        verdict = "Negative"; detail = `음성: 컨트롤만 유효`; confidence = "보통";
-      }
+      } else { verdict = "Negative"; detail = `음성: 컨트롤만 유효`; confidence = "보통"; }
     };
 
     decide(control, test, false);
     if (verdict === "Invalid") {
-      // 1) 축 반전 폴백
-      const alt = await analyzeOnce(axis === "x" ? "y" : "x");
+      const alt = await analyzeOnce(axis === "x" ? "y" : "x"); // 축 폴백
       if (alt.ok && alt.result) return alt;
-      // 2) 느슨 판정 재시도
-      decide(control, test, true);
+      decide(control, test, true); // 느슨 재시도
     }
 
-    // draw selected lines
+    // 선택 라인 표시
     const ov3 = overlayRef.current!.getContext("2d");
     if (ov3) {
       const drawLine = (idx: number, color: string) => {
@@ -814,7 +578,7 @@ export default function LfaAnalyzer() {
         ov3.stroke();
       };
       if (control) drawLine(control.idx, "#3b82f6");
-      if (test) drawLine(test.idx, "#ef4444");
+      if (test)    drawLine(test.idx,    "#ef4444");
     }
 
     return { ok: true, result: { verdict, detail, confidence } };
@@ -830,17 +594,9 @@ export default function LfaAnalyzer() {
         setResult(out.result);
         saveLog({ ts: Date.now(), text: "", verdict: out.result.verdict });
       } else if (out.reason === "nopeaks") {
-        setResult({
-          verdict: "Invalid",
-          detail: "스트립을 찾지 못했습니다. 반사/그림자 줄이고 창을 화면 가운데에 맞춰주세요.",
-          confidence: "약함",
-        });
+        setResult({ verdict: "Invalid", detail: "스트립을 찾지 못했습니다. 반사/그림자/로고를 줄이고 윈도 영역을 중앙에 맞춰주세요.", confidence: "약함" });
       } else {
-        setResult({
-          verdict: "Invalid",
-          detail: "처리 실패(알 수 없음). 다른 각도에서 다시 시도해 주세요.",
-          confidence: "약함",
-        });
+        setResult({ verdict: "Invalid", detail: "처리 실패(알 수 없음). 다른 각도/조명에서 다시 시도해 주세요.", confidence: "약함" });
       }
     } catch (err: any) {
       console.error(err);
@@ -856,18 +612,15 @@ export default function LfaAnalyzer() {
   const stop = (e: React.DragEvent) => e.preventDefault();
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) onPickFile(f); };
 
-  // 자동 분석 트리거 (비동기 + idle 양보)
+  // 자동 분석 트리거
   useEffect(() => {
     if (!imageUrl) return;
     let cancelled = false;
-    (async () => {
-      await idle(0);
-      if (!cancelled) await analyze();
-    })();
+    (async () => { await idle(0); if (!cancelled) await analyze(); })();
     return () => { cancelled = true; };
   }, [imageUrl, analyze]);
 
-  // manual clicks: 첫 클릭 C, 두 번째 T
+  // 수동 클릭: 첫 클릭 C, 두 번째 T
   useEffect(() => {
     const o = overlayRef.current; if (!o) return;
     const onClick = (e: MouseEvent) => {
@@ -893,16 +646,15 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">📷 LFA QuickCheck v4.6</h1>
-      <p className="text-sm text-gray-600 mb-4">세로 사진 보정 강화 + 맞춤 안내/근처 찾기. 자동 회전·윈도 검출·대비 보정·축 폴백 포함.</p>
+      <p className="text-sm text-gray-600 mb-4">세로 보정·윈도 검출·대비 보정·축 폴백 + 로고가드/고속화</p>
 
-      <div onDrop={onDrop} onDragEnter={stop} onDragOver={stop}
-           className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50">
+      <div onDrop={onDrop} onDragEnter={stop} onDragOver={stop} className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50">
         <label className="w-full cursor-pointer">
           <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onInput} />
           <div className="flex flex-col items-center gap-1">
             <div className="text-5xl">⬆️</div>
             <div className="font-medium">사진 업로드 / 드래그</div>
-            <div className="text-xs text-gray-500">팁: 윈도가 화면의 40~70%가 되게 채워서 찍으면 가장 정확해요.</div>
+            <div className="text-xs text-gray-500">팁: 키트 윈도가 화면의 40~70% 차지하도록 가까이 찍어주세요.</div>
           </div>
         </label>
       </div>
@@ -961,10 +713,7 @@ export default function LfaAnalyzer() {
         <div className="relative w-full overflow-hidden rounded-2xl bg-gray-100">
           <div className="aspect-video w-full relative">
             <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-contain" />
-            <canvas
-              ref={overlayRef}
-              className={`absolute inset-0 w-full h-full object-contain ${mode === "manual" ? "cursor-crosshair" : "pointer-events-none"}`}
-            />
+            <canvas ref={overlayRef} className={`absolute inset-0 w-full h-full object-contain ${mode === "manual" ? "cursor-crosshair" : "pointer-events-none"}`} />
           </div>
           <div className="p-2 text-xs text-gray-500">처리 결과 {mode === "manual" ? "(수동: 캔버스 클릭해 C/T 지정)" : ""}</div>
         </div>
@@ -975,18 +724,8 @@ export default function LfaAnalyzer() {
         <div className="text-sm text-gray-700">{result ? `${result.detail} · 신뢰도: ${result.confidence}` : "사진을 올리면 자동으로 판독합니다."}</div>
       </div>
 
-      {result?.verdict === "Positive" && (
-        <>
-          <SymptomLogger defaultVerdict="Positive" />
-          <NearbyFinder />
-        </>
-      )}
-
+      {result?.verdict === "Positive" && (<><SymptomLogger defaultVerdict="Positive" /><NearbyFinder /></>)}
       {result?.verdict === "Negative" && <NegativeAdvice again={() => analyze()} />}
-
-      {/* 필요 시 무효에도 근처 찾기 보일 수 있음
-      {result?.verdict === "Invalid" && <NearbyFinder compact />}
-      */}
     </div>
   );
 }
