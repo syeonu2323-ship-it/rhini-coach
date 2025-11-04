@@ -1,10 +1,12 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/** LFA QuickCheck v4.6 (Portrait fix + Nearby/Logger)
- * - 실제 자동 판독 로직(회전/윈도 검출/대비 보정/축 폴백/소프트 재시도)
- * - 양성: 증상 기록/약·과 추천 + 근처 약국·병원 찾기
- * - 음성: 재검 안내 + 라이트 증상 기록 + 근처 찾기
+/** LFA QuickCheck v4.6a (Portrait fix + Nearby/Logger + \n *  ⚡ Large-image freeze fix: downscale + staged rotation + cooperative yielding)
+ * - 기존 기능은 동일합니다.
+ * - 대용량 이미지 업로드 시 메인 스레드가 멈추던 문제를 아래 방식으로 완화합니다.
+ *   1) process 전용 비트맵을 1440px 이내로 선스케일(createImageBitmap resize)
+ *   2) 회전 탐색 2-pass(거친 탐색 → 정밀 탐색)로 연산량 축소
+ *   3) 주요 단계 사이 requestAnimationFrame/idle-yield로 UI 응답성 유지
  */
 
 // ---------- types ----------
@@ -371,9 +373,15 @@ const NegativeAdvice = ({ again }: { again?: () => void }) => {
 
 // -----------------------------
 //   메인: 실제 이미지 판독 + 보조 패널
+//   ⚡ 성능 개선 포인트
+//   - MAX_PROCESS_SIDE로 사전 축소(미리보기는 원본 표시)
+//   - analyze()를 async로 만들고 단계별 양보(rAF/idle)
+//   - 회전 탐색 2단계: coarse → fine
 // -----------------------------
 export default function LfaAnalyzer() {
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null); // 미리보기 전용(원본/브라우저 자동 다운샘플)
+  const [procBitmap, setProcBitmap] = useState<ImageBitmap | null>(null); // 처리 전용 비트맵(축소본)
+
   const [mode, setMode] = useState<Mode>("auto");
   const [sensitivity, setSensitivity] = useState<Sensitivity>("balanced");
   const [controlPos, setControlPos] = useState<ControlPos>("auto");
@@ -387,7 +395,7 @@ export default function LfaAnalyzer() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
 
-  // manual guides
+  // manual guides (기존 유지)
   const [guideC, setGuideC] = useState<number | null>(null);
   const [guideT, setGuideT] = useState<number | null>(null);
 
@@ -410,16 +418,24 @@ export default function LfaAnalyzer() {
     return s[Math.floor((s.length - 1) * q)];
   };
 
-  // ---------- rotation
-  function drawRotated(img: HTMLImageElement, deg: number) {
+  // ---------- tiny scheduler (cooperative yield)
+  const raf = () => new Promise<void>((res) => requestAnimationFrame(() => res()));
+  const idle = () =>
+    new Promise<void>((res) =>
+      ("requestIdleCallback" in window ? (window as any).requestIdleCallback(() => res(), { timeout: 16 }) : setTimeout(() => res(), 0))
+    );
+
+  // ---------- draw/rotate (proc source 우선)
+  function drawRotated(src: HTMLImageElement | ImageBitmap, deg: number) {
     const rad = (deg * Math.PI) / 180;
-    const srcW = img.naturalWidth || img.width, srcH = img.naturalHeight || img.height;
+    const srcW = ("naturalWidth" in src ? (src as HTMLImageElement).naturalWidth || (src as any).width : (src as ImageBitmap).width) as number;
+    const srcH = ("naturalHeight" in src ? (src as HTMLImageElement).naturalHeight || (src as any).height : (src as ImageBitmap).height) as number;
     const scale = Math.min(1, 900 / Math.max(srcW, srcH));
     const base = document.createElement("canvas");
     const bctx = base.getContext("2d")!;
     base.width = Math.round(srcW * scale);
     base.height = Math.round(srcH * scale);
-    bctx.drawImage(img, 0, 0, base.width, base.height);
+    bctx.drawImage(src as any, 0, 0, base.width, base.height);
     const w = base.width, h = base.height;
     const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
     const rw = Math.round(w * cos + h * sin), rh = Math.round(w * sin + h * cos);
@@ -566,30 +582,43 @@ export default function LfaAnalyzer() {
     return { z, peaks, quality };
   }
 
-  // ---------- main analyze with portrait fallback
+  // ---------- main analyze (sync core)
   const analyzeOnce = (forceAxis?: "x" | "y"): AnalyzeResult => {
-    if (!imgRef.current || !canvasRef.current || !overlayRef.current) return { ok: false, reason: "no canvas/img" };
+    if ((!imgRef.current && !procBitmap) || !canvasRef.current || !overlayRef.current) return { ok: false, reason: "no canvas/img" };
 
-    // 1) deskew: −30~+30 step 3
-    const img = imgRef.current;
-    const angles: number[] = [];
-    for (let a = -30; a <= 30; a += 3) angles.push(a);
+    // (1) rotation search — staged (coarse → fine)
+    const src = (procBitmap || imgRef.current!) as any;
+
+    // coarse pass
+    const coarseAngles: number[] = [];
+    for (let a = -24; a <= 24; a += 6) coarseAngles.push(a);
+
     let best: { angle: number; canvas: HTMLCanvasElement; energy: number } | null = null;
-    for (const a of angles) {
-      const c = drawRotated(img, a);
+    for (const a of coarseAngles) {
+      const c = drawRotated(src, a);
       const e = edgeEnergy(c);
       if (!best || e > best.energy) best = { angle: a, canvas: c, energy: e };
     }
+
+    // fine pass (±6°, step 2° around best)
+    const fineAngles: number[] = [];
+    const base = best!.angle;
+    for (let a = base - 6; a <= base + 6; a += 2) fineAngles.push(a);
+    for (const a of fineAngles) {
+      const c = drawRotated(src, a);
+      const e = edgeEnergy(c);
+      if (e > best!.energy) best = { angle: a, canvas: c, energy: e };
+    }
     setAppliedRotation(best!.angle);
 
-    // 2) draw base
+    // (2) draw base
     const out = canvasRef.current!;
     const octx = out.getContext("2d")!;
     out.width = best!.canvas.width;
     out.height = best!.canvas.height;
     octx.drawImage(best!.canvas, 0, 0);
 
-    // 3) window rect
+    // (3) window rect
     const rect = findWindowRect(best!.canvas);
     const overlay = overlayRef.current!;
     const ov = overlay.getContext("2d")!;
@@ -605,7 +634,7 @@ export default function LfaAnalyzer() {
     ov.lineWidth = 2;
     ov.strokeRect(rect.x0 + 0.5, rect.y0 + 0.5, rect.x1 - rect.x0 - 1, rect.y1 - rect.y0 - 1);
 
-    // 4) profiles
+    // (4) profiles
     const { profX, profY } = analyzeWindow(best!.canvas, rect);
     const px = peaksFromProfile(profX);
     const py = peaksFromProfile(profY);
@@ -622,7 +651,7 @@ export default function LfaAnalyzer() {
     const idxToCanvas = (i: number) => (axis === "x" ? rect.x0 + i : rect.y0 + i);
     const peaks = sel.peaks.map((p) => ({ ...p, idx: idxToCanvas(p.idx) }));
 
-    // 5) choose control/test
+    // (5) choose control/test
     const preset = PRESETS[sensitivity];
     const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
     const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
@@ -675,7 +704,7 @@ export default function LfaAnalyzer() {
       else { if (controlPos === "top") tryDir(1); else tryDir(-1); }
     }
 
-    // 6) verdict, with soft-retry if C weak
+    // (6) verdict
     const { CONTROL_MIN, TEST_MIN_ABS, TEST_MIN_REL, MIN_AREA_FRAC } = PRESETS[sensitivity];
 
     let verdict: Verdict = "Invalid";
@@ -738,45 +767,70 @@ export default function LfaAnalyzer() {
     return { ok: true, result: { verdict, detail, confidence } };
   };
 
-  const analyze = useCallback(() => {
-    if (!imgRef.current || !canvasRef.current || !overlayRef.current) return;
+  // ---------- 파일 입출력 (⚡ 사전 축소 추가)
+  const MAX_PROCESS_SIDE = 1440; // 처리 전용 축소 상한 (UI 미리보기엔 영향 없음)
+
+  const onPickFile = async (f: File) => {
+    // 미리보기 URL (원본/브라우저 내부 다운샘플)
+    setImageUrl(URL.createObjectURL(f));
+    setResult(null); setGuideC(null); setGuideT(null);
+
+    try {
+      // 처리 전용: createImageBitmap로 축소 비트맵 생성 (Safari/Chrome/Edge 지원)
+      const blob = f;
+      const img = await createImageBitmap(blob);
+      const scale = Math.min(1, MAX_PROCESS_SIDE / Math.max(img.width, img.height));
+      if (scale < 1) {
+        const resized = await createImageBitmap(blob, { resizeWidth: Math.round(img.width * scale), resizeHeight: Math.round(img.height * scale), resizeQuality: "high" as any });
+        setProcBitmap(resized);
+        img.close();
+      } else {
+        setProcBitmap(img);
+      }
+    } catch (e) {
+      // createImageBitmap 실패 시: HTMLImageElement 경유로 fallback (여전히 analyze는 동작)
+      setProcBitmap(null);
+      console.warn("createImageBitmap 실패 — 원본 이미지로 처리 시도", e);
+    }
+  };
+
+  const onInput = (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) onPickFile(f); };
+  const stop = (e: React.DragEvent) => e.preventDefault();
+  const onDrop = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) onPickFile(f); };
+
+  // ---------- analyze: async + 단계별 양보
+  const analyze = useCallback(async () => {
+    if ((!imgRef.current && !procBitmap) || !canvasRef.current || !overlayRef.current) return;
     try {
       setBusy(true);
-      const out = analyzeOnce(); // 타입: AnalyzeResult
 
-if (out.ok) {
-  setResult(out.result);
-  saveLog({ ts: Date.now(), text: "", verdict: out.result.verdict });
-} else if (out.reason === "nopeaks") {
-  setResult({
-    verdict: "Invalid",
-    detail:
-      "스트립을 찾지 못했습니다. 반사/그림자 줄이고 창을 화면 가운데에 맞춰주세요.",
-    confidence: "약함",
-  });
-} else {
-  setResult({
-    verdict: "Invalid",
-    detail: "처리 실패(알 수 없음). 다른 각도에서 다시 시도해 주세요.",
-    confidence: "약함",
-  });
-}
+      // 첫 프레임 양보 (버튼 반응/스피너 표시)
+      await raf();
 
+      // core analyze (coarse → fine 내부)
+      const out = analyzeOnce();
+
+      // 중간 양보 (결과 표시 전 렌더 기회)
+      await idle();
+
+      if (out.ok) {
+        setResult(out.result);
+        saveLog({ ts: Date.now(), text: "", verdict: out.result.verdict });
+      } else if (out.reason === "nopeaks") {
+        setResult({ verdict: "Invalid", detail: "스트립을 찾지 못했습니다. 반사/그림자 줄이고 창을 화면 가운데에 맞춰주세요.", confidence: "약함" });
+      } else {
+        setResult({ verdict: "Invalid", detail: "처리 실패(알 수 없음). 다른 각도에서 다시 시도해 주세요.", confidence: "약함" });
+      }
     } catch (err: any) {
       console.error(err);
       setResult({ verdict: "Invalid", detail: `처리 중 오류: ${err?.message || "unknown"}`, confidence: "약함" });
     } finally {
       setBusy(false);
     }
-  }, [sensitivity, controlPos, requireTwoLines]); // eslint-disable-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sensitivity, controlPos, requireTwoLines, procBitmap]);
 
-  // 파일 입출력
-  const onPickFile = (f: File) => { setImageUrl(URL.createObjectURL(f)); setResult(null); setGuideC(null); setGuideT(null); };
-  const onInput = (e: React.ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) onPickFile(f); };
-  const stop = (e: React.DragEvent) => e.preventDefault();
-  const onDrop = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) onPickFile(f); };
-
-  useEffect(() => { if (imageUrl) { const t = setTimeout(() => analyze(), 120); return () => clearTimeout(t); } }, [imageUrl, analyze]);
+  useEffect(() => { if (imageUrl) { const t = setTimeout(() => { analyze(); }, 120); return () => clearTimeout(t); } }, [imageUrl, analyze]);
 
   // manual clicks: 첫 클릭 C, 두 번째 T (pointer-events 처리 주의)
   useEffect(() => {
@@ -803,8 +857,8 @@ if (out.ok) {
 
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
-      <h1 className="text-2xl sm:text-3xl font-semibold mb-1">📷 LFA QuickCheck v4.6</h1>
-      <p className="text-sm text-gray-600 mb-4">세로 사진 보정 강화 + 맞춤 안내/근처 찾기. 자동 회전·윈도 검출·대비 보정·축 폴백 포함.</p>
+      <h1 className="text-2xl sm:text-3xl font-semibold mb-1">📷 LFA QuickCheck v4.6a</h1>
+      <p className="text-sm text-gray-600 mb-4">세로 사진 보정 + 맞춤 안내/근처 찾기. <b>대용량 이미지 최적화 적용</b> (사전 축소 + 2단 회전탐색 + 단계별 양보).</p>
 
       <div onDrop={onDrop} onDragEnter={stop} onDragOver={stop}
            className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50">
@@ -899,8 +953,7 @@ if (out.ok) {
       {result?.verdict === "Negative" && <NegativeAdvice again={() => analyze()} />}
 
       {/* 필요 시 무효에도 근처 찾기 보일 수 있음
-      {result?.verdict === "Invalid" && <NearbyFinder compact />}
-      */}
+      {result?.verdict === "Invalid" && <NearbyFinder compact />} */}
     </div>
   );
 }
