@@ -2,10 +2,6 @@
 
 import LfaAnalyzer from "@/components/LfaAnalyzer";
 
-export default function AnalyzePage() {
-  return <LfaAnalyzer />;
-}
-
 import React, {
   useCallback,
   useEffect,
