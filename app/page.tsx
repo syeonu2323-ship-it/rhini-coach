@@ -1,443 +1,142 @@
 "use client";
-import React, { useEffect, useState } from "react";
 
-/** ───────────────────────── 공통 레이아웃 ───────────────────────── */
-export default function Page(){
-  // 탭: log / report / advice / settings
-  const [tab, setTab] = useState<"log"|"report"|"advice"|"settings">("log");
+import React, { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
+
+// --- 위치 훅 + 네이버/카카오 링크 ---
+function useGeo() {
+  const [lat, setLat] = useState<number | null>(null);
+  const [lng, setLng] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const request = useCallback(() => {
+    if (!navigator.geolocation) {
+      setErr("이 브라우저에서는 위치 기능을 지원하지 않습니다.");
+      return;
+    }
+    setLoading(true);
+    setErr(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLat(pos.coords.latitude);
+        setLng(pos.coords.longitude);
+        setLoading(false);
+      },
+      (e) => {
+        setErr(e.message || "위치 정보를 가져오지 못했습니다.");
+        setLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+    );
+  }, []);
+
+  return { lat, lng, loading, err, request };
+}
+
+function naverSearchUrl(q: string, lat?: number | null, lng?: number | null) {
+  const query = encodeURIComponent(q);
+  if (lat != null && lng != null) {
+    const c = `${lng},${lat},15,0,0,0,d`;
+    return `https://map.naver.com/v5/search/${query}?c=${c}`;
+  }
+  return `https://map.naver.com/v5/search/${query}`;
+}
+
+function kakaoSearchUrl(q: string, lat?: number | null, lng?: number | null) {
+  const query = encodeURIComponent(q);
+  if (lat != null && lng != null)
+    return `https://map.kakao.com/link/search/${query}?x=${lng}&y=${lat}`;
+  return `https://map.kakao.com/?q=${query}`;
+}
+
+function NearbyFinderHome() {
+  const { lat, lng, loading, err, request } = useGeo();
+
+  const openBoth = (q: string) => {
+    window.open(naverSearchUrl(q, lat, lng), "_blank");
+    window.open(kakaoSearchUrl(q, lat, lng), "_blank");
+  };
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-sky-50 to-white text-zinc-900">
-      <header className="sticky top-0 bg-white/80 backdrop-blur border-b">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="font-bold">RhiniCoach MVP</div>
-          <nav className="flex gap-2">
-            {[
-              ["log","로그"],["report","리포트"],["advice","약 추천"],["settings","설정"]
-            ].map(([k, label])=>(
-              <button key={k} onClick={()=>setTab(k as any)}
-                className={`px-3 py-1.5 rounded-xl text-sm ${tab===k?'bg-zinc-900 text-white':'bg-zinc-100'}`}>
-                {label}
-              </button>
-            ))}
-          </nav>
+    <div className="mt-4 p-4 rounded-2xl border bg-emerald-50 border-emerald-300">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="font-semibold">📍 근처 약국·병원 찾기</span>
+        <button
+          onClick={request}
+          className="px-2 py-1 rounded-md border text-xs hover:bg-gray-50"
+          disabled={loading}
+        >
+          {loading
+            ? "위치 불러오는 중…"
+            : lat && lng
+            ? "내 위치 새로고침"
+            : "내 위치로 찾기"}
+        </button>
+      </div>
+      {err && (
+        <div className="text-xs text-red-600 mb-2">위치 오류: {err}</div>
+      )}
+      {lat && lng && (
+        <div className="text-xs text-gray-500 mb-2">
+          내 위치: {lat.toFixed(5)}, {lng.toFixed(5)}
         </div>
-      </header>
-
-      <main className="max-w-5xl mx-auto px-4 py-6 grid gap-6">
-        {tab==="log" && <Log />}
-        {tab==="report" && <Report />}
-        {tab==="advice" && <Advice />}
-        {tab==="settings" && <Settings />}
-      </main>
-
-      <footer className="py-8 text-center text-xs text-zinc-500">
-        Prototype · Wellness reference · Not medical advice
-      </footer>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={() => openBoth("약국")}
+          className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm"
+        >
+          약국 찾기 (네이버/카카오)
+        </button>
+        <button
+          onClick={() => openBoth("이비인후과")}
+          className="px-3 py-1.5 rounded-lg bg-white border text-sm"
+        >
+          이비인후과 찾기
+        </button>
+        <button
+          onClick={() => openBoth("호흡기내과")}
+          className="px-3 py-1.5 rounded-lg bg-white border text-sm"
+        >
+          호흡기내과 찾기
+        </button>
+        <button
+          onClick={() => openBoth("응급실")}
+          className="px-3 py-1.5 rounded-lg bg-white border text-sm"
+        >
+          응급실 찾기
+        </button>
+      </div>
+      <p className="mt-2 text-xs text-gray-500">
+        * HTTPS 환경에서 위치 권한을 허용해야 정확한 검색이 가능합니다.
+      </p>
     </div>
   );
 }
 
-function Card({children}:{children: React.ReactNode}) {
-  return <div className="rounded-2xl border p-4 bg-white">{children}</div>
-}
-
-/** ───────────────────────── 1) 증상 일지(확장) ───────────────────────── */
-type SymEntry = {
-  ts: string;
-  sneeze: number; rhinorrhea: number; congestion: number;
-  itchyEyes: number; eyeRedness: number; throatItch: number;
-  cough: number; postNasalDrip: number; headache: number;
-  fatigue: number; sleepQuality: number;
-  meds: { antihist: boolean; incs: boolean; leukotriene: boolean };
-  triggers: { dust: boolean; pet: boolean; pollen: boolean; coldAir: boolean };
-  note?: string;
-};
-function newEntry(): SymEntry {
-  return {
-    ts: new Date().toISOString(),
-    sneeze:0, rhinorrhea:0, congestion:0,
-    itchyEyes:0, eyeRedness:0, throatItch:0,
-    cough:0, postNasalDrip:0, headache:0,
-    fatigue:0, sleepQuality:0,
-    meds:{ antihist:false, incs:false, leukotriene:false },
-    triggers:{ dust:false, pet:false, pollen:false, coldAir:false },
-    note:""
-  };
-}
-function Log(){
-  const [list, setList] = useState<SymEntry[]>([]);
-  const [entry, setEntry] = useState<SymEntry>(newEntry());
-  useEffect(()=>{ const s = localStorage.getItem("rc_symptoms"); if(s) try{ setList(JSON.parse(s)); }catch{} },[]);
-  function setNum<K extends keyof SymEntry>(key: K, v: number){ setEntry(p => ({...p, [key]: v} as SymEntry)); }
-  function add(){
-    const next = [...list, entry];
-    localStorage.setItem("rc_symptoms", JSON.stringify(next));
-    setList(next);
-    setEntry(newEntry());
-  }
-  const sliders: { key: keyof SymEntry, label: string }[] = [
-    {key:"sneeze", label:"재채기"},
-    {key:"rhinorrhea", label:"콧물"},
-    {key:"congestion", label:"코막힘"},
-    {key:"itchyEyes", label:"눈 가려움"},
-    {key:"eyeRedness", label:"눈 충혈"},
-    {key:"throatItch", label:"목 가려움/이물감"},
-    {key:"cough", label:"기침"},
-    {key:"postNasalDrip", label:"후비루(목뒤로 넘어감)"},
-    {key:"headache", label:"두통/안면압"},
-    {key:"fatigue", label:"피로"},
-    {key:"sleepQuality", label:"수면의 질(높을수록 나쁨)"},
-  ];
-  return (
-    <Card>
-      <div className="font-semibold mb-2">증상 일지</div>
-      <div className="grid md:grid-cols-2 gap-6">
-        <div className="text-sm space-y-4">
-          <div className="grid gap-3">
-            {sliders.map(({key,label})=>(
-              <label key={String(key)} className="block">
-                <div className="flex justify-between mb-1">
-                  <span>{label}</span>
-                  <span className="text-xs text-zinc-500">{(entry as any)[key]}</span>
-                </div>
-                <input type="range" min={0} max={3} step={1}
-                  value={(entry as any)[key] ?? 0}
-                  onChange={e=>setNum(key as any, +e.target.value)}
-                  className="w-full"/>
-                <div className="flex justify-between text-[11px] text-zinc-500">
-                  <span>0</span><span>1</span><span>2</span><span>3</span>
-                </div>
-              </label>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="font-medium mb-1">복용 약</div>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.meds.antihist}
-                onChange={e=>setEntry({...entry, meds:{...entry.meds, antihist:e.target.checked}})}/> 항히스타민</label>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.meds.incs}
-                onChange={e=>setEntry({...entry, meds:{...entry.meds, incs:e.target.checked}})}/> 비강 스테로이드(INCS)</label>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.meds.leukotriene}
-                onChange={e=>setEntry({...entry, meds:{...entry.meds, leukotriene:e.target.checked}})}/> 류코트리엔 억제제</label>
-            </div>
-            <div>
-              <div className="font-medium mb-1">트리거</div>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.triggers.dust}
-                onChange={e=>setEntry({...entry, triggers:{...entry.triggers, dust:e.target.checked}})}/> 집먼지/진드기</label>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.triggers.pet}
-                onChange={e=>setEntry({...entry, triggers:{...entry.triggers, pet:e.target.checked}})}/> 반려동물</label>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.triggers.pollen}
-                onChange={e=>setEntry({...entry, triggers:{...entry.triggers, pollen:e.target.checked}})}/> 꽃가루</label>
-              <label className="flex items-center gap-2"><input type="checkbox"
-                checked={entry.triggers.coldAir}
-                onChange={e=>setEntry({...entry, triggers:{...entry.triggers, coldAir:e.target.checked}})}/> 찬 공기/기온변화</label>
-            </div>
-          </div>
-
-          <div>
-            <div className="font-medium mb-1">메모</div>
-            <textarea
-              className="w-full px-3 py-2 rounded-lg bg-zinc-100"
-              rows={3}
-              value={entry.note ?? ""}
-              onChange={e=>setEntry({...entry, note:e.target.value})}
-              placeholder="특이사항을 적어주세요(운동, 외출, 음식, 노출 등)"/>
-          </div>
-
-          <button onClick={add} className="px-4 py-2 rounded-xl bg-zinc-900 text-white">기록 추가</button>
-        </div>
-
-        <div className="space-y-3 max-h-[70vh] overflow-auto pr-2">
-          {list.slice().reverse().map((s,i)=>(
-            <div key={i} className="rounded-xl border p-3 text-sm">
-              <div className="flex items-center justify-between">
-                <div className="text-xs text-zinc-500">{new Date(s.ts).toLocaleString()}</div>
-                <div className="text-xs">
-                  {s.meds?.antihist?"AH ":""}{s.meds?.incs?"INCS ":""}{s.meds?.leukotriene?"LTRA":""}
-                </div>
-              </div>
-              <div className="mt-1 text-[13px] text-zinc-800">
-                재채기{s.sneeze} · 콧물{s.rhinorrhea} · 코막힘{s.congestion} · 눈가려움{s.itchyEyes} · 기침{s.cough}
-              </div>
-              {s.note && <div className="mt-1 text-[12px] text-zinc-600 line-clamp-2">메모: {s.note}</div>}
-            </div>
-          ))}
-          {list.length===0 && <div className="text-sm text-zinc-500">아직 기록이 없습니다.</div>}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-/** ───────────────────────── 2) 리포트(날씨 기반 예측) ───────────────────────── */
-function Report(){
-  const [lat, setLat] = useState("37.5665");
-  const [lon, setLon] = useState("126.9780");
-  const [loading, setLoading] = useState(false);
-  const [today, setToday] = useState<any>(null);
-  const [tomorrow, setTomorrow] = useState<any>(null);
-  const [d2, setD2] = useState<any>(null);
-
-  async function callRisk(offset: number){
-    setLoading(true);
-    try{
-      const r = await fetch(`/api/rhinitis?lat=${lat}&lon=${lon}&dayOffset=${offset}`).then(r=>r.json());
-      if (offset===0) setToday(r);
-      if (offset===1) setTomorrow(r);
-      if (offset===2) setD2(r);
-    } finally {
-      setLoading(false);
-    }
-  }
+// --- 홈 페이지 ---
+export default function Home() {
+  const router = useRouter();
 
   return (
-    <Card>
-      <div className="font-semibold mb-2">비염 위험 리포트</div>
-      <div className="grid sm:grid-cols-3 gap-2 text-sm mb-3">
-        <input className="px-3 py-2 rounded-lg bg-white border w-full"
-               value={lat} onChange={(e)=>setLat(e.target.value)} placeholder="위도 (lat)"/>
-        <input className="px-3 py-2 rounded-lg bg-white border w-full"
-               value={lon} onChange={(e)=>setLon(e.target.value)} placeholder="경도 (lon)"/>
-        <div className="flex gap-2">
-          <button type="button" onClick={()=>callRisk(0)} className="px-3 py-2 rounded-lg bg-zinc-900 text-white">
-            {loading ? "계산 중..." : "오늘"}
-          </button>
-          <button type="button" onClick={()=>callRisk(1)} className="px-3 py-2 rounded-lg bg-zinc-900 text-white">내일</button>
-          <button type="button" onClick={()=>callRisk(2)} className="px-3 py-2 rounded-lg bg-zinc-900 text-white">모레</button>
-        </div>
+    <div className="w-full max-w-3xl mx-auto p-6">
+      <h1 className="text-3xl font-semibold mb-2">LFA QuickCheck 홈</h1>
+      <p className="text-sm text-gray-600 mb-4">
+        먼저 내 주변 약국·병원을 확인하고, 필요하면 키트 사진으로 결과를
+        판독해 보세요.
+      </p>
+
+      <NearbyFinderHome />
+
+      <div className="mt-8 flex justify-center">
+        <button
+          onClick={() => router.push("/analyze")}
+          className="px-5 py-3 rounded-xl bg-indigo-600 text-white text-lg hover:bg-indigo-700"
+        >
+          📷 키트 판독하러 가기
+        </button>
       </div>
-
-      {[["오늘", today], ["내일", tomorrow], ["모레", d2]].map(([label, data]) => (
-        <div key={label as string} className="mt-4 text-sm">
-          <div className="font-semibold">{label}</div>
-          {data ? (
-            <div className="mt-1">
-              <div>예측: <b>{data.risk.level}</b> (점수 {data.risk.score}/5)</div>
-              <ul className="list-disc pl-5 mt-1">
-                {data.risk.tips.map((t:string)=> <li key={t}>{t}</li>)}
-              </ul>
-            </div>
-          ) : <div className="text-zinc-500">아직 계산 전이에요.</div>}
-        </div>
-      ))}
-    </Card>
-  );
-}
-/** ───────────────────────── 3) 약 추천(복합) ─────────────────────────
- * 최근 증상 + 오늘/내일 날씨 위험 점수(0~5)를 합쳐 규칙 기반 추천.
- * 약국/의사 방문 지도 버튼 포함.
- */
-function Advice(){
-  const [latest, setLatest] = useState<any>(null);
-  const [lat, setLat] = useState("37.5665");
-  const [lon, setLon] = useState("126.9780");
-  const [dayOffset, setDayOffset] = useState<0|1>(0); // 0=오늘, 1=내일
-  const [weather, setWeather] = useState<{score:number; level:string} | null>(null);
-  const [cards, setCards] = useState<Array<{title:string; detail:string}>>([]);
-
-  useEffect(()=>{
-    try{
-      const arr = JSON.parse(localStorage.getItem("rc_symptoms") || "[]");
-      if (Array.isArray(arr) && arr.length > 0) {
-        const last = arr[arr.length-1];
-        setLatest(last);
-      }
-    }catch{}
-  },[]);
-
-  async function fetchWeatherRisk(){
-    const r = await fetch(`/api/rhinitis?lat=${lat}&lon=${lon}&dayOffset=${dayOffset}`).then(r=>r.json());
-    setWeather({ score: Number(r?.risk?.score ?? 0), level: String(r?.risk?.level ?? "낮음") });
-  }
-
-  function build(){
-    if (!latest) { alert("먼저 '로그' 탭에서 증상 기록을 1개 이상 추가해 주세요."); return; }
-    const rec = recommendMedsCombined(latest, weather?.score ?? null, weather?.level ?? null);
-    setCards(rec);
-  }
-
-  function useMyLocation(){
-    if (!navigator.geolocation) { alert("브라우저가 위치를 지원하지 않습니다."); return; }
-    navigator.geolocation.getCurrentPosition(
-      pos => { setLat(String(pos.coords.latitude)); setLon(String(pos.coords.longitude)); },
-      () => alert("위치 권한을 허용해주세요.")
-    );
-  }
-
-  const mapGooglePharmacy = `https://www.google.com/maps/search/%EC%95%BD%EA%B5%AD/@${lat},${lon},15z`;
-  const mapGoogleENT      = `https://www.google.com/maps/search/%EC%9D%B4%EB%B9%84%EC%9D%B8%ED%9B%84%EA%B3%BC/@${lat},${lon},15z`;
-  const mapNaverPharmacy  = `https://map.naver.com/v5/search/%EC%95%BD%EA%B5%AD?c=${lon},${lat},15,0,0,0,dh`;
-  const mapNaverENT       = `https://map.naver.com/v5/search/%EC%9D%B4%EB%B9%84%EC%9D%B8%ED%9B%84%EA%B3%BC?c=${lon},${lat},15,0,0,0,dh`;
-
-  return (
-    <Card>
-      <div className="font-semibold mb-2">약 추천 (증상 + 날씨 위험도)</div>
-
-      {/* 1) 입력/조회 바 */}
-      <div className="grid sm:grid-cols-3 gap-2 text-sm mb-3">
-        <input className="px-3 py-2 rounded-lg bg-white border w-full" value={lat} onChange={e=>setLat(e.target.value)} placeholder="위도(lat)"/>
-        <input className="px-3 py-2 rounded-lg bg-white border w-full" value={lon} onChange={e=>setLon(e.target.value)} placeholder="경도(lon)"/>
-        <div className="flex gap-2 flex-wrap">
-          <select value={dayOffset} onChange={e=>setDayOffset(Number(e.target.value) as 0|1)} className="px-3 py-2 rounded-lg bg-zinc-100">
-            <option value={0}>오늘</option>
-            <option value={1}>내일</option>
-          </select>
-          <button onClick={useMyLocation} className="px-3 py-2 rounded-lg bg-zinc-200">내 위치</button>
-          <button onClick={fetchWeatherRisk} className="px-3 py-2 rounded-lg bg-zinc-900 text-white">날씨 위험 불러오기</button>
-        </div>
-      </div>
-
-      {/* 2) 상태 요약 */}
-      <div className="grid md:grid-cols-2 gap-3 mb-3 text-sm">
-        <div className="rounded-xl bg-zinc-50 border p-3">
-          <div className="text-xs text-zinc-500">최근 증상 기록</div>
-          {latest
-            ? <div className="mt-1 text-zinc-700">
-                시각: {new Date(latest.ts).toLocaleString()}<br/>
-                재채기 {latest.sneeze} · 콧물 {latest.rhinorrhea} · 코막힘 {latest.congestion} · 눈가려움 {latest.itchyEyes}
-              </div>
-            : <div className="text-zinc-500">없음 (로그 탭에서 추가)</div>}
-        </div>
-        <div className="rounded-xl bg-zinc-50 border p-3">
-          <div className="text-xs text-zinc-500">{dayOffset===0?"오늘":"내일"} 날씨 위험</div>
-          {weather
-            ? <div className="mt-1 text-zinc-700">레벨: <b>{weather.level}</b> · 점수 {weather.score}/5</div>
-            : <div className="text-zinc-500">“날씨 위험 불러오기”를 눌러주세요</div>}
-        </div>
-      </div>
-
-      {/* 3) 추천 만들기 */}
-      <div className="mb-3">
-        <button onClick={build} className="px-4 py-2 rounded-xl bg-emerald-600 text-white">추천 생성</button>
-      </div>
-
-      {/* 4) 추천 카드 */}
-      {cards.length>0 ? (
-        <div className="grid md:grid-cols-2 gap-3">
-          {cards.map((c,i)=>(
-            <div key={i} className="rounded-xl border p-3 text-sm">
-              <div className="font-medium">{c.title}</div>
-              <div className="text-[13px] text-zinc-700 mt-1 whitespace-pre-wrap">{c.detail}</div>
-            </div>
-          ))}
-        </div>
-      ) : <div className="text-sm text-zinc-500">추천이 아직 없습니다. 상단에서 날씨 위험을 불러오고 “추천 생성”을 눌러주세요.</div>}
-
-      {/* 5) 약국/의사 방문 버튼 */}
-      <div className="mt-4 grid sm:grid-cols-2 gap-2">
-        <a href={mapGooglePharmacy} target="_blank" rel="noopener noreferrer"
-           className="px-4 py-2 rounded-xl bg-blue-600 text-white text-center">근처 약국 (Google)</a>
-        <a href={mapNaverPharmacy} target="_blank" rel="noopener noreferrer"
-           className="px-4 py-2 rounded-xl bg-green-600 text-white text-center">근처 약국 (Naver)</a>
-        <a href={mapGoogleENT} target="_blank" rel="noopener noreferrer"
-           className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-center">이비인후과 (Google)</a>
-        <a href={mapNaverENT} target="_blank" rel="noopener noreferrer"
-           className="px-4 py-2 rounded-xl bg-teal-600 text-white text-center">이비인후과 (Naver)</a>
-      </div>
-
-      <div className="text-xs text-zinc-500 mt-3">
-        * 본 정보는 일반적인 웰니스 가이드이며, 진단·치료를 대체하지 않습니다. 심한 증상·호흡곤란·안면통 지속·고열 등은 즉시 의료진과 상담하세요.
-      </div>
-    </Card>
-  );
-}
-
-/** 증상 + 날씨 위험(0~5) 결합 추천 */
-function recommendMedsCombined(s:any, weatherScore:number|null, weatherLevel:string|null){
-  const v = (x:any)=> typeof x==="number" ? x : 0;
-  // 핵심 지표(0~3 → 0~5)
-  const to5 = (x:number)=> x*(5/3);
-  const nasal = to5((v(s.rhinorrhea)+v(s.congestion)+v(s.sneeze))/3);
-  const ocular = to5((v(s.itchyEyes)+v(s.eyeRedness))/2);
-  const coughPND = to5((v(s.cough)+v(s.postNasalDrip))/2);
-  const sleep = to5(v(s.sleepQuality));
-
-  // 종합 지표(가벼운 가중치): 비강 0.5, 눈 0.2, 기침/후비루 0.2, 수면 0.1
-  const symptomIdx = Number((nasal*0.5 + ocular*0.2 + coughPND*0.2 + sleep*0.1).toFixed(2));
-  const w = weatherScore ?? 0;
-  const out: Array<{title:string; detail:string}> = [];
-
-  // ── 1) 강력 조합 케이스 ──
-  if (symptomIdx >= 3.5 && w >= 3.5) {
-    out.push({
-      title: "강력 조합: INCS + 항히스타민",
-      detail: "- 코막힘/콧물/재채기 모두 강함 → INCS 매일 사용 + 2세대 항히스타민 병용 고려\n- 외출 시 마스크 · 귀가 후 샤워/코세척\n- 1~2주 지속/악화 시 진료 권고"
-    });
-  } else if (symptomIdx >= 3.0 && w >= 2.5) {
-    out.push({
-      title: "중등도 조합: INCS 중심",
-      detail: "- 코막힘 비중↑ → INCS 우선, 재채기·콧물 동반 시 AH 추가\n- 취침 전 세척/가습 보조"
-    });
-  }
-
-  // ── 2) 증상↑, 날씨↓ → 비알레르기/감염 가능성도 점검 ──
-  if (symptomIdx >= 3.0 && w < 2.0) {
-    out.push({
-      title: "증상은 높은데 날씨 위험 낮음",
-      detail: "- 실내 트리거(집먼지/반려동물)·감염성 증상(발열/농성분비/얼굴통증) 점검\n- 세척 + 필요시 AH/INCS 단기 사용\n- 악화/지속 시 진료"
-    });
-  }
-
-  // ── 3) 증상↓, 날씨↑ → 예방 전략 ──
-  if (symptomIdx < 1.5 && w >= 3.0) {
-    out.push({
-      title: "예방: 위험 높은 날 대비",
-      detail: "- 외출 전 마스크 · 귀가 후 세안/코세척\n- 이전에 계절성 악화 경험 있으면 AH PRN 또는 낮은 강도 INCS 고려"
-    });
-  }
-
-  // ── 4) 개별 도메인 보정 ──
-  if (ocular >= 2.5) {
-    out.push({ title: "눈 증상 대책", detail: "- 점안 항히스타민/복합제 + 인공눈물 세척\n- 콘택트렌즈 사용 시 위생 주의" });
-  }
-  if (coughPND >= 2.5) {
-    out.push({ title: "후비루/기침 관리", detail: "- 생리식염수 세척, 수분섭취, 취침 시 상체/베개 높이기\n- 지속 시 의료진 상담" });
-  }
-  if (sleep >= 2.5) {
-    out.push({ title: "수면 방해 개선", detail: "- 야간 악화면 저녁 INCS 또는 졸림 적은 2세대 AH 고려" });
-  }
-
-  // ── 5) LTRA 고려 ──
-  if (nasal >= 3.0 || coughPND >= 2.5) {
-    out.push({ title: "LTRA(류코트리엔 억제제) 고려", detail: "- 천식/천명/운동유발 증상 동반 시 의료진과 상의" });
-  }
-
-  // ── 6) 트리거 보조 ──
-  const trg = s?.triggers || {};
-  if (trg.pollen) out.push({ title:"꽃가루 회피", detail:"- 외출 시 마스크/안경 · 귀가 후 샤워/세탁 · 환기 타이밍 조절" });
-  if (trg.dust) out.push({ title:"집먼지/진드기", detail:"- 침구 커버 · 주 1회 60℃ 세탁 · 진공청소/물걸레" });
-  if (trg.pet)  out.push({ title:"반려동물", detail:"- 침실 출입 제한 · HEPA 공기청정기" });
-  if (trg.coldAir) out.push({ title:"찬 공기", detail:"- 마스크/스카프 사용으로 비강 보온" });
-
-  // ── 7) 안전 문구 ──
-  out.push({
-    title: "주의/경고",
-    detail: "- 본 앱은 정보 제공용입니다(진단·치료 대체 아님)\n- 고열·농성분비·안면통 지속·후각소실/심한 천명은 즉시 진료 권고"
-  });
-
-  // 기본 케이스
-  if (out.length === 1) {
-    out.unshift({ title:"증상 경미", detail:"- 생활요법(세척/환기/샤워) 우선 · 필요 시 AH PRN" });
-  }
-
-  return out;
-}
-
-
-
-/** ───────────────────────── 4) 설정 ───────────────────────── */
-function Settings(){
-  return (
-    <Card>
-      <div className="font-semibold mb-2">설정</div>
-      <div className="text-sm text-zinc-600">추가 옵션을 여기에 계속 붙이면 됩니다.</div>
-    </Card>
+    </div>
   );
 }
