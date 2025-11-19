@@ -15,79 +15,92 @@ export default function Home() {
   }>(null);
 
   // -----------------------------
-  // 증상 → 질환 추정 알고리즘
-  // -----------------------------
-  function analyzeSymptoms(symptoms: {
-    sneeze: boolean;
-    itch: boolean;
-    runny: boolean;
-    fever: boolean;
-    facialPain: boolean;
-    thickMucus: boolean;
-  }) {
-    let allergicScore = 0;
-    let bacterialScore = 0;
+// 증상 → 질환 추정 알고리즘
+// -----------------------------
+function analyzeSymptoms(symptoms: {
+  sneeze: boolean;
+  itch: boolean;
+  runny: boolean;
+  fever: boolean;
+  facialPain: boolean;
+  thickMucus: boolean;
+}) {
+  let allergicScore = 0;
+  let bacterialScore = 0;
 
-    // 알레르기성 비염 지표
-    if (symptoms.sneeze) allergicScore++;
-    if (symptoms.itch) allergicScore++;
-    if (symptoms.runny) allergicScore++;
+  // 알레르기성 비염 지표
+  if (symptoms.sneeze) allergicScore++;
+  if (symptoms.itch) allergicScore++;
+  if (symptoms.runny) allergicScore++;
 
-    // 세균성 비염 지표
-    if (symptoms.fever) bacterialScore++;
-    if (symptoms.facialPain) bacterialScore++;
-    if (symptoms.thickMucus) bacterialScore++;
+  // 세균성 비염 지표
+  if (symptoms.fever) bacterialScore++;
+  if (symptoms.facialPain) bacterialScore++;
+  if (symptoms.thickMucus) bacterialScore++;
 
-    let category: "allergic" | "bacterial" | "mixed" | "unknown" = "unknown";
+  let category: "allergic" | "bacterial" | "mixed" | "unknown" = "unknown";
 
-    if (allergicScore >= 2 && bacterialScore >= 2) category = "mixed";
-    else if (allergicScore >= 2) category = "allergic";
-    else if (bacterialScore >= 2) category = "bacterial";
-    else category = "unknown";
+  if (allergicScore >= 2 && bacterialScore >= 2) category = "mixed";
+  else if (allergicScore >= 2) category = "allergic";
+  else if (bacterialScore >= 2) category = "bacterial";
 
-    // 결과를 매핑
-    const resultMap = {
-      allergic: {
-        message: "알레르기성 비염 가능성이 높아요.",
-        meds: ["항히스타민제", "비강 스테로이드 스프레이", "생리식염수 세척"],
-        tips: [
-          "외출 후 코 세척하기",
-          "침구류 주기적 세탁",
-          "먼지·꽃가루 많은 날 마스크 착용",
-          "실내 공기청정기 사용",
-        ],
-      },
-      bacterial: {
-        message: "세균성 비염(부비동염) 가능성이 높아요.",
-        meds: ["항생제(병원처방)", "진통해열제", "비충혈 제거제(단기)"],
-        tips: [
-          "얼굴 찜질로 통증 완화",
-          "실내 습도 유지(40~50%)",
-          "증상 지속 시 이비인후과 방문",
-        ],
-      },
-      mixed: {
-        message: "알레르기 + 세균성 혼합형 가능성이 있어요.",
-        meds: [
-          "항히스타민제",
-          "비강 스테로이드",
-          "항생제(병원 진료 필요)",
-        ],
-        tips: [
-          "생리식염수 세척",
-          "충분한 수분 섭취",
-          "통증·발열 지속 시 병원 방문",
-        ],
-      },
-      unknown: {
-        message: "특정 유형으로 판단하기 어려워요.",
-        meds: ["증상 완화제(종합감기약)", "비강 세척"],
-        tips: ["증상 심해지면 병원 방문", "휴식 충분히 취하기"],
-      },
-    };
+  // 🟣 여기가 문제였던 부분 → category를 포함하도록 수정 완료
+  const resultMap: Record<
+    "allergic" | "bacterial" | "mixed" | "unknown",
+    {
+      category: "allergic" | "bacterial" | "mixed" | "unknown";
+      message: string;
+      meds: string[];
+      tips: string[];
+    }
+  > = {
+    allergic: {
+      category: "allergic",
+      message: "알레르기성 비염 가능성이 높아요.",
+      meds: ["항히스타민제", "비강 스테로이드 스프레이", "생리식염수 세척"],
+      tips: [
+        "외출 후 코 세척하기",
+        "침구류 주기적 세탁",
+        "먼지·꽃가루 많은 날 마스크 착용",
+        "실내 공기청정기 사용",
+      ],
+    },
+    bacterial: {
+      category: "bacterial",
+      message: "세균성 비염(부비동염) 가능성이 높아요.",
+      meds: ["항생제(병원처방)", "진통해열제", "비충혈 제거제(단기)"],
+      tips: [
+        "얼굴 찜질로 통증 완화",
+        "실내 습도 유지(40~50%)",
+        "증상 지속 시 이비인후과 방문",
+      ],
+    },
+    mixed: {
+      category: "mixed",
+      message: "알레르기 + 세균성 혼합형 가능성이 있어요.",
+      meds: [
+        "항히스타민제",
+        "비강 스테로이드",
+        "항생제(병원 진료 필요)",
+      ],
+      tips: [
+        "생리식염수 세척",
+        "충분한 수분 섭취",
+        "통증·발열 지속 시 병원 방문",
+      ],
+    },
+    unknown: {
+      category: "unknown",
+      message: "특정 유형으로 판단하기 어려워요.",
+      meds: ["증상 완화제(종합감기약)", "비강 세척"],
+      tips: ["증상 심해지면 병원 방문", "휴식 충분히 취하기"],
+    },
+  };
 
-    setSymptomResult(resultMap[category]);
-  }
+  // 이제 타입 100% 맞음
+  setSymptomResult(resultMap[category]);
+}
+
 
   return (
     <div className="w-full max-w-xl mx-auto p-6 text-center">
