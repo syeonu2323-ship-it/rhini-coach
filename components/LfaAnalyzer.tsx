@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 
-/** LFA QuickCheck v5.0
+/** LFA QuickCheck v5.1
  * - Web Worker로 메인 프리즈 방지
  * - 대용량 이미지 자동 축소(≤1400px), 회전 탐색
  * - Crop 모드(드래그 ROI)로 로고/여백 배제
@@ -760,6 +760,15 @@ function makeWorkerURL() {
     return { z, peaks, quality };
   }
 
+  function pickControl(sorted, controlPos) {
+    if (!sorted.length) return null;
+    if (controlPos === "left" || controlPos === "top") return sorted[0];
+    if (controlPos === "right" || controlPos === "bottom") return sorted[sorted.length - 1];
+    if (sorted.length === 1) return sorted[0];
+    const first = sorted[0], last = sorted[sorted.length - 1];
+    return first.z >= last.z ? first : last;
+  }
+
   function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
     // 회전 탐색: -18 ~ +18, step 2
     const angles = [];
@@ -850,24 +859,86 @@ function makeWorkerURL() {
     }
 
     // --- 3라인 후보 선택 (C + T1(ECP) + T2(MPO)) ---
-    let control = null;
+    const sorted = valid.slice().sort(function (a, b) {
+      return a.idx - b.idx;
+    });
+
+    let control = pickControl(sorted, controlPos);
+    if (!control) {
+      return { ok: false, reason: "nopeaks", rect: rect, axis: axis };
+    }
+
+    const remaining = [];
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i] === control) continue;
+      remaining.push(sorted[i]);
+    }
+
+    // 테스트 라인 0개 → 컨트롤만 인식된 경우
+    if (!remaining.length) {
+      if (control.z < preset.CONTROL_MIN * 0.9) {
+        return { ok: false, reason: "nopeaks", rect: rect, axis: axis };
+      }
+      return {
+        ok: true,
+        result: {
+          verdict: "Negative",
+          detail: "컨트롤 라인만 인식되었습니다.",
+          confidence: control.z > 2.0 ? "보통" : "약함",
+          diagnosis: "none",
+          ecpPositive: false,
+          mpoPositive: false,
+        },
+      };
+    }
+
+    // 가장 강한 테스트 라인 2개까지 사용
+    remaining.sort(function (a, b) {
+      return b.z - a.z;
+    });
+    let t1 = remaining[0] || null;
+    let t2 = remaining[1] || null;
+
     let tECP = null;
     let tMPO = null;
 
-    if (valid.length >= 3) {
-      const top3 = valid.slice(0, 3);
-      control = top3[0];
-      const tests = top3.slice(1).sort(function (a, b) {
+    if (t1 && t2) {
+      const pair = [t1, t2].sort(function (a, b) {
         return a.idx - b.idx;
       });
-      tECP = tests[0];
-      tMPO = tests[1];
-    } else {
-      const byPos = valid.slice().sort(function (a, b) {
-        return a.idx - b.idx;
-      });
-      control = byPos[0];
-      tECP = byPos[1] || null;
+
+      if (controlPos === "left" || controlPos === "top") {
+        // C - ECP - MPO 방향
+        tECP = pair[0];
+        tMPO = pair[1];
+      } else if (controlPos === "right" || controlPos === "bottom") {
+        // MPO - ECP - C 방향 → 반대로 매핑
+        tECP = pair[1];
+        tMPO = pair[0];
+      } else {
+        // auto: C - ECP - MPO 가 되도록 최대한 맞추기
+        if (control.idx <= pair[0].idx) {
+          tECP = pair[0];
+          tMPO = pair[1];
+        } else if (control.idx >= pair[1].idx) {
+          tECP = pair[0];
+          tMPO = pair[1];
+        } else {
+          // C가 가운데라면, C와 더 가까운 쪽을 ECP로 본다
+          const d0 = Math.abs(pair[0].idx - control.idx);
+          const d1 = Math.abs(pair[1].idx - control.idx);
+          if (d0 <= d1) {
+            tECP = pair[0];
+            tMPO = pair[1];
+          } else {
+            tECP = pair[1];
+            tMPO = pair[0];
+          }
+        }
+      }
+    } else if (t1) {
+      // 테스트 라인 1개만 있을 때: 일단 ECP로 배정 (알레르기 단독 양성 시나리오 고려)
+      tECP = t1;
       tMPO = null;
     }
 
@@ -885,7 +956,7 @@ function makeWorkerURL() {
       const absOK = t.z >= absMin;
       const relOK = t.z >= c.z * relMin;
 
-      return areaOK && absOK && relOK;
+      return areaOK && (absOK || relOK);
     }
 
     const ecpPos = isTestPositive(control, tECP, preset);
@@ -1127,7 +1198,6 @@ export default function LfaAnalyzer() {
       const w = Math.abs(p.x - sx);
       const h = Math.abs(p.y - sy);
       setCrop({ x, y, w, h });
-      drawOverlay();
     };
 
     const mup = () => {
@@ -1224,7 +1294,7 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">
-        📷 LFA QuickCheck v5.0
+        📷 LFA QuickCheck v5.1
       </h1>
       <p className="text-sm text-gray-600 mb-4">
         3라인(C + ECP + MPO) 자동 판독 · 워커 기반 프리즈 방지 · Crop 모드
@@ -1271,7 +1341,6 @@ export default function LfaAnalyzer() {
             value={mode}
             onChange={(e) => {
               setMode(e.target.value as Mode);
-              drawOverlay();
             }}
           >
             <option value="auto">자동</option>
@@ -1304,10 +1373,10 @@ export default function LfaAnalyzer() {
             }
           >
             <option value="auto">자동</option>
-            <option value="left">왼쪽</option>
-            <option value="right">오른쪽</option>
-            <option value="top">위쪽</option>
-            <option value="bottom">아래쪽</option>
+            <option value="left">왼쪽(C - ECP - MPO)</option>
+            <option value="right">오른쪽(MPO - ECP - C)</option>
+            <option value="top">위쪽(C - ECP - MPO)</option>
+            <option value="bottom">아래쪽(MPO - ECP - C)</option>
           </select>
         </div>
 
@@ -1317,7 +1386,7 @@ export default function LfaAnalyzer() {
             checked={requireTwoLines}
             onChange={(e) => setRequireTwoLines(e.target.checked)}
           />
-          두 줄 요구(T 없으면 음성) — (3라인 구조에서도 사용 가능)
+          두 줄 요구(T 없으면 음성) — 2라인 키트용 옵션(3라인에선 거의 영향 없음)
         </label>
       </div>
 
@@ -1369,6 +1438,46 @@ export default function LfaAnalyzer() {
             ? `${result.detail} · 신뢰도: ${result.confidence}`
             : "사진을 올리고 ‘분석’을 누르세요. 워커로 멈춤 없이 처리됩니다."}
         </div>
+
+        {result && (
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            {"ecpPositive" in result && (
+              <span
+                className={
+                  "px-2 py-1 rounded-full " +
+                  (result.ecpPositive
+                    ? "bg-amber-100 text-amber-800"
+                    : "bg-gray-100 text-gray-700")
+                }
+              >
+                T1 · ECP: {result.ecpPositive ? "양성" : "음성"}
+              </span>
+            )}
+            {"mpoPositive" in result && (
+              <span
+                className={
+                  "px-2 py-1 rounded-full " +
+                  (result.mpoPositive
+                    ? "bg-sky-100 text-sky-800"
+                    : "bg-gray-100 text-gray-700")
+                }
+              >
+                T2 · MPO: {result.mpoPositive ? "양성" : "음성"}
+              </span>
+            )}
+            {result.diagnosis && result.diagnosis !== "none" && (
+              <span className="px-2 py-1 rounded-full bg-indigo-50 text-indigo-700">
+                해석:{" "}
+                {result.diagnosis === "allergic"
+                  ? "알레르기성 비염 패턴"
+                  : result.diagnosis === "bacterial"
+                  ? "세균성 비염 패턴"
+                  : "혼합형 비염 패턴"}
+              </span>
+            )}
+          </div>
+        )}
+
         {mode === "crop" && (
           <div className="mt-2 text-xs text-amber-700">
             💡 ROI(초록 박스) 안의 C/T 창만 분석합니다. 로고/글자/구멍은
