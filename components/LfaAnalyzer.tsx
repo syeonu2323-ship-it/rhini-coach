@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 
-/** LFA QuickCheck v5.1
+/** LFA QuickCheck v5.2
  * - Web Worker로 메인 프리즈 방지
  * - 대용량 이미지 자동 축소(≤1400px), 회전 탐색
  * - Crop 모드(드래그 ROI)로 로고/여백 배제
@@ -17,6 +17,8 @@ import React, {
  *   - T2(MPO) 양성 → 세균성 비염
  *   - 둘 다 양성 → 혼합형 비염
  * - 판독 결과에 따라 알레르기/세균/혼합형 맞춤 안내
+ * - 테스트 라인 간 간격 필터 강화 → 1줄 양성을 2줄로 착각하던 상황 완화
+ * - 모바일(터치)에서도 Crop 드래그 가능
  */
 
 type Verdict = "Positive" | "Negative" | "Invalid";
@@ -868,10 +870,22 @@ function makeWorkerURL() {
       return { ok: false, reason: "nopeaks", rect: rect, axis: axis };
     }
 
+    // 컨트롤과의 거리/테스트 라인끼리 최소 간격 조건으로 필터링
     const remaining = [];
     for (let i = 0; i < sorted.length; i++) {
-      if (sorted[i] === control) continue;
-      remaining.push(sorted[i]);
+      const p = sorted[i];
+      if (p === control) continue;
+      const dC = Math.abs(p.idx - control.idx);
+      if (dC < minSep || dC > maxSep) continue;
+      let tooCloseToOther = false;
+      for (let j = 0; j < remaining.length; j++) {
+        const q = remaining[j];
+        if (Math.abs(p.idx - q.idx) < minSep) {
+          tooCloseToOther = true;
+          break;
+        }
+      }
+      if (!tooCloseToOther) remaining.push(p);
     }
 
     // 테스트 라인 0개 → 컨트롤만 인식된 경우
@@ -1047,10 +1061,8 @@ function makeWorkerURL() {
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("auto");
-  const [sensitivity, setSensitivity] =
-    useState<Sensitivity>("balanced");
-  const [controlPos, setControlPos] =
-    useState<ControlPos>("auto");
+  const [sensitivity, setSensitivity] = useState<Sensitivity>("balanced");
+  const [controlPos, setControlPos] = useState<ControlPos>("auto");
   const [requireTwoLines, setRequireTwoLines] = useState(true);
 
   const [result, setResult] = useState<{
@@ -1172,26 +1184,26 @@ export default function LfaAnalyzer() {
     const ov = overlayRef.current;
     if (!ov) return;
 
-    const toImgCoord = (e: MouseEvent) => {
+    const toImgCoordFromClient = (clientX: number, clientY: number) => {
       const r = ov.getBoundingClientRect();
-      const x = ((e.clientX - r.left) / r.width) * ov.width;
-      const y = ((e.clientY - r.top) / r.height) * ov.height;
+      const x = ((clientX - r.left) / r.width) * ov.width;
+      const y = ((clientY - r.top) / r.height) * ov.height;
       return {
         x: Math.max(0, Math.min(ov.width, x)),
         y: Math.max(0, Math.min(ov.height, y)),
       };
     };
 
-    const mdown = (e: MouseEvent) => {
+    const onDown = (clientX: number, clientY: number) => {
       if (mode !== "crop") return;
-      const p = toImgCoord(e);
+      const p = toImgCoordFromClient(clientX, clientY);
       drag.current = { sx: p.x, sy: p.y };
       setCrop({ x: p.x, y: p.y, w: 0, h: 0 });
     };
 
-    const mmove = (e: MouseEvent) => {
+    const onMove = (clientX: number, clientY: number) => {
       if (!drag.current) return;
-      const p = toImgCoord(e);
+      const p = toImgCoordFromClient(clientX, clientY);
       const { sx, sy } = drag.current;
       const x = Math.min(sx, p.x);
       const y = Math.min(sy, p.y);
@@ -1200,7 +1212,37 @@ export default function LfaAnalyzer() {
       setCrop({ x, y, w, h });
     };
 
+    const mdown = (e: MouseEvent) => {
+      e.preventDefault();
+      onDown(e.clientX, e.clientY);
+    };
+
+    const mmove = (e: MouseEvent) => {
+      if (!drag.current) return;
+      e.preventDefault();
+      onMove(e.clientX, e.clientY);
+    };
+
     const mup = () => {
+      drag.current = null;
+    };
+
+    const tstart = (e: TouchEvent) => {
+      if (e.touches.length === 0) return;
+      const t = e.touches[0];
+      e.preventDefault();
+      onDown(t.clientX, t.clientY);
+    };
+
+    const tmove = (e: TouchEvent) => {
+      if (!drag.current) return;
+      if (e.touches.length === 0) return;
+      const t = e.touches[0];
+      e.preventDefault();
+      onMove(t.clientX, t.clientY);
+    };
+
+    const tend = () => {
       drag.current = null;
     };
 
@@ -1208,10 +1250,20 @@ export default function LfaAnalyzer() {
     window.addEventListener("mousemove", mmove);
     window.addEventListener("mouseup", mup);
 
+    ov.addEventListener("touchstart", tstart, { passive: false });
+    window.addEventListener("touchmove", tmove, { passive: false });
+    window.addEventListener("touchend", tend);
+    window.addEventListener("touchcancel", tend);
+
     return () => {
       ov.removeEventListener("mousedown", mdown);
       window.removeEventListener("mousemove", mmove);
       window.removeEventListener("mouseup", mup);
+
+      ov.removeEventListener("touchstart", tstart);
+      window.removeEventListener("touchmove", tmove);
+      window.removeEventListener("touchend", tend);
+      window.removeEventListener("touchcancel", tend);
     };
   }, [mode]);
 
@@ -1294,11 +1346,11 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">
-        📷 LFA QuickCheck v5.1
+        📷 LFA QuickCheck v5.2
       </h1>
       <p className="text-sm text-gray-600 mb-4">
         3라인(C + ECP + MPO) 자동 판독 · 워커 기반 프리즈 방지 · Crop 모드
-        지원.
+        및 모바일 드래그 지원.
       </p>
 
       <div
@@ -1386,7 +1438,7 @@ export default function LfaAnalyzer() {
             checked={requireTwoLines}
             onChange={(e) => setRequireTwoLines(e.target.checked)}
           />
-          두 줄 요구(T 없으면 음성) — 2라인 키트용 옵션(3라인에선 거의 영향 없음)
+          두 줄 요구(T 없으면 음성) — 2라인 키트용 옵션(3라인에선 영향 거의 없음)
         </label>
       </div>
 
