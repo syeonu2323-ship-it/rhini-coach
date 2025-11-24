@@ -1412,11 +1412,10 @@ export default function LfaAnalyzer() {
     id="mobileCameraInput"
     type="file"
     accept="image/*"
-    capture="environment"
     className="hidden"
     onChange={onInput}
-    multiple={false}
   />
+
 
 
           <div className="flex flex-col items-center gap-1">
