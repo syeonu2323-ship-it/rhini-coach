@@ -9,17 +9,16 @@ import React, {
 } from "react";
 
 /**
- * LFA QuickCheck v5.3 (Worker + Crop + 3-Line ECP/MPO)
+ * LFA QuickCheck v5.4 (Worker + Crop + 3-Line ECP/MPO, C/M/E 전용 튜닝)
  *
  * - Web Worker로 무거운 연산 분리 → 메인 프리즈 최소화
  * - 대용량 이미지 자동 축소(최대 1400px)
  * - Crop 모드(마우스/터치 드래그)로 로고·여백 제외하고 C/T 창만 분석
- * - 3라인 구조: C + T1(ECP) + T2(MPO)
- *   - T1(ECP) 양성 → 알레르기성 비염 패턴
- *   - T2(MPO) 양성 → 세균성 비염 패턴
- *   - 둘 다 양성 → 혼합형 비염 패턴
- * - 테스트 라인 간 간격/폭/면적 기준 강화 → 1줄 양성을 2줄로 착각하던 케이스 완화
- * - 모바일(터치)에서도 Crop 드래그 가능
+ * - 3라인 구조: C + M(MPO) + E(ECP) 고정형 키트에 맞게 라인 매핑
+ *   - Control(가장 강한 peak) 기준으로 거리 가까운 순:
+ *     ① MPO, ② ECP 로 인식
+ * - Control 라인이 없거나 매우 약하면 즉시 무효 처리
+ * - 테스트 라인 양성 기준 완화 (실제 MPO/ECP만 잘 잡히도록)
  */
 
 type Verdict = "Positive" | "Negative" | "Invalid";
@@ -43,7 +42,7 @@ type AnalyzeResult =
     }
   | {
       ok: false;
-      reason?: "nopeaks" | string;
+      reason?: "nopeaks" | "noControl" | string;
       rect?: unknown;
       axis?: "x" | "y";
     };
@@ -720,10 +719,9 @@ function findWindowRect(c) {
     for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
   }
   const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
-let a = 255 / Math.max(1, p99 - p1);
-const b = -a * p1;
-a = a * 1.4;   // contrast 강화
-
+  let a = 255 / Math.max(1, p99 - p1);
+  const b = -a * p1;
+  a = a * 1.4;  // contrast 강화
 
   for (let yy = y0; yy <= y1; yy++) {
     for (let xx = x0; xx <= x1; xx++) {
@@ -810,29 +808,6 @@ function peaksFromProfile(arr) {
   return { z, peaks, quality };
 }
 
-function pickControl(sorted, controlPos) {
-  if (!sorted.length) return null;
-  if (controlPos === "left" || controlPos === "top") return sorted[0];
-  if (controlPos === "right" || controlPos === "bottom") return sorted[sorted.length - 1];
-  if (sorted.length === 1) return sorted[0];
-  const first = sorted[0], last = sorted[sorted.length - 1];
-  return first.z >= last.z ? first : last;
-}
-
-function isTestPositive(controlPeak, testPeak, preset) {
-  if (!controlPeak || !testPeak) return false;
-  const c = controlPeak, t = testPeak;
-  const cMin = preset.CONTROL_MIN * 0.9;
-  const absMin = preset.TEST_MIN_ABS * 0.95;
-  const relMin = preset.TEST_MIN_REL * 0.9;
-  const areaFrac = preset.MIN_AREA_FRAC * 0.85;
-  if (c.z < cMin) return false;
-  const areaOK = t.area >= c.area * areaFrac;
-  const absOK = t.z >= absMin;
-  const relOK = t.z >= c.z * relMin;
-  return areaOK && (absOK || relOK);
-}
-
 function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   const angles = [];
   for (let a = -18; a <= 18; a += 2) angles.push(a);
@@ -884,7 +859,9 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
       for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
     }
     const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
-    const a = 255 / Math.max(1, p99 - p1), b = -a * p1;
+    let a = 255 / Math.max(1, p99 - p1);
+    const b = -a * p1;
+    a = a * 1.4;
     for (let yy = y0; yy <= y1; yy++) {
       for (let xx = x0; xx <= x1; xx++) {
         const k = yy * w + xx;
@@ -916,108 +893,59 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   const preset = PRESETS[sensitivity];
 
   const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
-  const minSep = Math.round(unit * preset.MIN_SEP_FRAC);
-  const maxSep = Math.round(unit * preset.MAX_SEP_FRAC);
-
   const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.45);
 
   if (!valid.length) {
     return { ok: false, reason: "nopeaks", rect, axis };
   }
 
-  const sorted = valid.slice().sort((a, b) => a.idx - b.idx);
-  const control = pickControl(sorted, controlPos);
+  // Control = 가장 강한 peak
+  const control = valid.slice().sort((a, b) => b.z - a.z)[0];
 
-  if (!control) {
-    return { ok: false, reason: "nopeaks", rect, axis };
+  if (!control || control.z < 0.8) {
+    return { ok: false, reason: "noControl", rect, axis };
   }
 
-  const remaining = [];
-  for (let i = 0; i < sorted.length; i++) {
-    const p = sorted[i];
-    if (p === control) continue;
-    const dC = Math.abs(p.idx - control.idx);
-    if (dC < minSep || dC > maxSep) continue;
+  const tests = valid.filter((p) => p !== control);
 
-    let tooCloseToOther = false;
-    for (let j = 0; j < remaining.length; j++) {
-      const q = remaining[j];
-      if (Math.abs(p.idx - q.idx) < minSep) {
-        tooCloseToOther = true;
-        break;
-      }
-    }
-    if (!tooCloseToOther) remaining.push(p);
-  }
-
-// --- ECP / MPO 자동 매핑 (Control 기준 거리 기반) ---
-let tECP = null;
-let tMPO = null;
-
-if (remaining.length >= 2) {
-  const sortedByDist = remaining
-    .map(p => ({
-      peak: p,
-      dist: Math.abs(p.idx - control.idx)
-    }))
+  const testsByDist = tests
+    .map((p) => ({ peak: p, dist: Math.abs(p.idx - control.idx) }))
     .sort((a, b) => a.dist - b.dist);
 
-  // Control에 가장 가까운 라인 → ECP
-  tECP = sortedByDist[0].peak;
+  let mpo = testsByDist[0] ? testsByDist[0].peak : null;
+  let ecp = testsByDist[1] ? testsByDist[1].peak : null;
 
-  // 두 번째로 가까운 라인 → MPO
-  tMPO = sortedByDist[1] ? sortedByDist[1].peak : null;
+  const absMin = preset.TEST_MIN_ABS * 0.75;
+  const relMin = preset.TEST_MIN_REL * 0.75;
+  const areaFrac = preset.MIN_AREA_FRAC * 0.9;
 
-} else if (remaining.length === 1) {
-  tECP = remaining[0];
-  tMPO = null;
-}
+  function testPositive(ctrl, t) {
+    if (!t) return false;
+    const absOK = t.z >= absMin;
+    const relOK = t.z >= ctrl.z * relMin;
+    const areaOK = t.area >= ctrl.area * areaFrac;
+    return areaOK && (absOK || relOK);
+  }
 
-
-  const ecpPos = isTestPositive(control, tECP, preset);
-  const mpoPos = isTestPositive(control, tMPO, preset);
+  const mpoPos = testPositive(control, mpo);
+  const ecpPos = testPositive(control, ecp);
 
   let diagnosis = "none";
-  if (ecpPos && mpoPos) diagnosis = "mixed";
-  else if (ecpPos) diagnosis = "allergic";
+  if (mpoPos && ecpPos) diagnosis = "mixed";
   else if (mpoPos) diagnosis = "bacterial";
+  else if (ecpPos) diagnosis = "allergic";
 
-  let verdict = "Invalid";
-  let detail = "";
-  let confidence = "약함";
+  let verdict = "Negative";
+  if (mpoPos || ecpPos) verdict = "Positive";
 
-  if (!control || control.z < PRESETS[sensitivity].CONTROL_MIN * 0.9) {
-    verdict = "Invalid";
-    detail = "컨트롤 라인이 약하거나 인식되지 않았습니다 (C z=" +
-      (control && control.z ? control.z.toFixed(2) : "0.00") +
-      ").";
-  } else {
-    // 컨트롤은 충분히 강함
-    if (!ecpPos && !mpoPos) {
-      verdict = "Negative";
-      detail = "음성: 두 테스트 라인이 기준 미달입니다. (C z=" +
-        control.z.toFixed(2) + ")";
-      confidence = control.z > 2.2 ? "확실" : "보통";
-      diagnosis = "none";
-    } else {
-      verdict = "Positive";
-      const ecpStr = ecpPos ? "양성" : "음성";
-      const mpoStr = mpoPos ? "양성" : "음성";
-      detail =
-        "양성 패턴: ECP=" +
-        ecpStr +
-        ", MPO=" +
-        mpoStr +
-        " (C z=" +
-        control.z.toFixed(2) +
-        " / T1 z=" +
-        (tECP && tECP.z ? tECP.z.toFixed(2) : "0.00") +
-        " / T2 z=" +
-        (tMPO && tMPO.z ? tMPO.z.toFixed(2) : "0.00") +
-        ")";
-      confidence = "보통";
-    }
-  }
+  const confidence = control.z > 1.8 ? "확실" : "보통";
+  const detail =
+    "C=" +
+    control.z.toFixed(2) +
+    ", MPO=" +
+    (mpo ? mpo.z.toFixed(2) : "0.00") +
+    ", ECP=" +
+    (ecp ? ecp.z.toFixed(2) : "0.00");
 
   return {
     ok: true,
@@ -1128,16 +1056,15 @@ export default function LfaAnalyzer() {
     setImageUrl(url);
   };
 
- const onInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-  try {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    onPickFile(f);
-  } catch (err) {
-    console.error("Image input error:", err);
-  }
-};
-
+  const onInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    try {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      onPickFile(f);
+    } catch (err) {
+      console.error("Image input error:", err);
+    }
+  };
 
   const stopDrag = (e: React.DragEvent) => e.preventDefault();
 
@@ -1306,6 +1233,12 @@ export default function LfaAnalyzer() {
             "스트립을 찾지 못했습니다. (Crop 모드에서 C/T 창만 박스로 지정해보세요)",
           confidence: "약함",
         });
+      } else if (res.reason === "noControl") {
+        setResult({
+          verdict: "Invalid",
+          detail: "컨트롤 라인이 인식되지 않았습니다. 키트 결과 자체가 무효일 수 있습니다.",
+          confidence: "약함",
+        });
       } else {
         setResult({
           verdict: "Invalid",
@@ -1376,11 +1309,11 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">
-        📷 LFA QuickCheck v5.3
+        📷 LFA QuickCheck v5.4
       </h1>
       <p className="text-sm text-gray-600 mb-4">
-        3라인(C + ECP + MPO) 자동 판독 · Web Worker 기반 프리즈 방지 · Crop
-        모드 및 모바일 드래그 지원.
+        3라인(C + M(MPO) + E(ECP)) 자동 판독 · Web Worker 기반 프리즈 방지 ·
+        Crop 모드 및 모바일 드래그 지원.
       </p>
 
       <div
@@ -1390,34 +1323,14 @@ export default function LfaAnalyzer() {
         className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50"
       >
         <label htmlFor="mobileCameraInput" className="w-full cursor-pointer">
-  <input
-    id="mobileCameraInput"
-    type="file"
-    accept="image/*"
-    className="hidden"
-    multiple={false}
-    onChange={(e) => {
-      try {
-        const f = e.target.files?.[0];
-        if (!f) return;
-        onPickFile(f);
-      } catch (err) {
-        console.error("input error:", err);
-      }
-    }}
-  />
-
-
-  <input
-    id="mobileCameraInput"
-    type="file"
-    accept="image/*"
-    className="hidden"
-    onChange={onInput}
-  />
-
-
-
+          <input
+            id="mobileCameraInput"
+            type="file"
+            accept="image/*"
+            className="hidden"
+            multiple={false}
+            onChange={onInput}
+          />
           <div className="flex flex-col items-center gap-1">
             <div className="text-5xl">⬆️</div>
             <div className="font-medium">사진 업로드 / 드래그</div>
@@ -1476,10 +1389,10 @@ export default function LfaAnalyzer() {
             }
           >
             <option value="auto">자동</option>
-            <option value="left">왼쪽(C - ECP - MPO)</option>
-            <option value="right">오른쪽(MPO - ECP - C)</option>
-            <option value="top">위쪽(C - ECP - MPO)</option>
-            <option value="bottom">아래쪽(MPO - ECP - C)</option>
+            <option value="left">왼쪽(C - M - E)</option>
+            <option value="right">오른쪽(E - M - C)</option>
+            <option value="top">위쪽(C - M - E)</option>
+            <option value="bottom">아래쪽(E - M - C)</option>
           </select>
         </div>
 
@@ -1557,7 +1470,7 @@ export default function LfaAnalyzer() {
                     : "bg-gray-100 text-gray-700")
                 }
               >
-                T1 · ECP: {result.ecpPositive ? "양성" : "음성"}
+                T2 · ECP: {result.ecpPositive ? "양성" : "음성"}
               </span>
             )}
             {"mpoPositive" in result && (
@@ -1569,7 +1482,7 @@ export default function LfaAnalyzer() {
                     : "bg-gray-100 text-gray-700")
                 }
               >
-                T2 · MPO: {result.mpoPositive ? "양성" : "음성"}
+                T1 · MPO: {result.mpoPositive ? "양성" : "음성"}
               </span>
             )}
             {result.diagnosis && result.diagnosis !== "none" && (
