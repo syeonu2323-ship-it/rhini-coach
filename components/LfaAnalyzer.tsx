@@ -9,17 +9,16 @@ import React, {
 } from "react";
 
 /**
- * LFA QuickCheck v5.5 (Worker + Crop + 3-Line ECP/MPO, C/M/E 전용 튜닝 강화)
+ * LFA QuickCheck v5.4 (Worker + Crop + 3-Line ECP/MPO, ECP-MPO-C 전용 튜닝)
  *
  * - Web Worker로 무거운 연산 분리 → 메인 프리즈 최소화
  * - 대용량 이미지 자동 축소(최대 1400px)
  * - Crop 모드(마우스/터치 드래그)로 로고·여백 제외하고 C/T 창만 분석
- * - 3라인 구조: C + M(MPO) + E(ECP) 고정형 키트에 맞게 라인 매핑
- *   - Control(가장 강한 peak) 기준으로 거리 가까운 순:
- *     ① MPO, ② ECP 로 인식
- * - Control 라인이 없거나 매우 약하면 즉시 무효 처리
- * - 테스트 라인 양성 기준을 훨씬 보수적으로 설정해서
- *   실제 ECP/MPO 진짜 라인만 잡히도록 튜닝
+ * - 3라인 구조: E(ECP) - M(MPO) - C(Control) 전용 튜닝
+ *   - 라인 방향으로 가장 바깥쪽(끝단)에 있는 선을 Control 후보로 잡음
+ *   - Control에서 가까운 순서: ① MPO, ② ECP
+ * - Control 라인이 없거나 위치가 이상하면 무효 처리
+ * - 테스트 라인 양성 기준 보수적으로 강화 (음성이 양성으로 뜨는 거 최대한 방지)
  */
 
 type Verdict = "Positive" | "Negative" | "Invalid";
@@ -564,7 +563,7 @@ function getRhinitisAdvice(d: Diagnosis) {
 // -----------------------------
 function makeWorkerURL() {
   const src = `
-const PRESETS = ${JSON.stringify(PRESETS)};
+const PRESETS = JSON.parse('${JSON.stringify(PRESETS)}');
 
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 
@@ -890,47 +889,81 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   }
 
   const sel = axis === "x" ? px : py;
-  const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
-  const preset = PRESETS[sensitivity];
+  const preset = PRESETS[sensitivity] || PRESETS["balanced"];
 
-  const controlMin = preset.CONTROL_MIN;
-  const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
-  const valid = sel.peaks.filter(
-    (p) => p.width <= maxWidth && p.z > controlMin * 0.4
-  );
+  // 프로파일 길이(라인 방향 픽셀 수 기준)
+  const unitLen = sel.z.length > 1 ? sel.z.length - 1 : 1;
 
-  if (!valid.length) {
+  const maxWidth = Math.max(3, Math.round(unitLen * preset.MAX_WIDTH_FRAC));
+  const minSep = unitLen * preset.MIN_SEP_FRAC;
+  const maxSep = unitLen * preset.MAX_SEP_FRAC;
+
+  // 너무 넓지 않고 어느 정도 강도가 있는 peak만 후보로
+  const candidates = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.35);
+
+  if (!candidates.length) {
     return { ok: false, reason: "nopeaks", rect, axis };
   }
 
-  // Control = 가장 강한 peak
-  const control = valid.slice().sort((a, b) => b.z - a.z)[0];
+  // 컨트롤 라인은 항상 C창의 끝쪽(가장 자리)에 위치한다는 가정
+  const edgeDist = (p) => Math.min(p.idx, unitLen - p.idx);
+  let control = candidates.slice().sort((a, b) => edgeDist(a) - edgeDist(b))[0];
 
-  if (!control || control.z < controlMin) {
+  const controlEdgeFrac = edgeDist(control) / unitLen;
+
+  // 끝쪽에 충분히 가깝지 않거나, 강도가 너무 약하면 컨트롤 없음으로 처리
+  const controlMinZ = preset.CONTROL_MIN || 1.4;
+  if (!control || controlEdgeFrac > 0.28 || control.z < controlMinZ) {
     return { ok: false, reason: "noControl", rect, axis };
   }
 
-  const tests = valid.filter((p) => p !== control);
+  // 컨트롤과 일정 거리(minSep ~ maxSep) 떨어진 peak들만 테스트 라인 후보
+  const tests = candidates.filter((p) => {
+    if (p === control) return false;
+    const d = Math.abs(p.idx - control.idx);
+    return d >= minSep && d <= maxSep;
+  });
 
+  // 테스트 라인이 전혀 없으면: 컨트롤만 있는 '정상 음성'
+  if (!tests.length) {
+    const detail =
+      "C=" + control.z.toFixed(2) + ", MPO=0.00, ECP=0.00";
+
+    const confidence =
+      control.z > controlMinZ + 0.3 ? "확실" : "보통";
+
+    return {
+      ok: true,
+      result: {
+        verdict: "Negative",
+        detail,
+        confidence,
+        diagnosis: "none",
+        ecpPositive: false,
+        mpoPositive: false,
+      },
+    };
+  }
+
+  // 컨트롤에서 가까운 순으로: 1번째 = MPO, 2번째 = ECP (ECP-MPO-C 구조 가정)
   const testsByDist = tests
     .map((p) => ({ peak: p, dist: Math.abs(p.idx - control.idx) }))
     .sort((a, b) => a.dist - b.dist);
 
-  let mpo = testsByDist[0] ? testsByDist[0].peak : null;
-  let ecp = testsByDist[1] ? testsByDist[1].peak : null;
+  const mpo = testsByDist[0] ? testsByDist[0].peak : null;
+  const ecp = testsByDist[1] ? testsByDist[1].peak : null;
 
-  const absMin = preset.TEST_MIN_ABS;       // 더 보수적으로: 절대 기준 그대로 사용
-  const relMin = preset.TEST_MIN_REL;       // 상대 기준도 그대로 사용
-  const areaFrac = preset.MIN_AREA_FRAC;    // 면적 기준도 완화 없이 사용
-  const minZ = 1.0;                         // z-score가 1.0 이상인 피크만 테스트 라인 후보
+  // 테스트 라인 양성 판정 기준 (보수적으로 강화)
+  const absMin = preset.TEST_MIN_ABS;
+  const relMin = preset.TEST_MIN_REL;
+  const areaFrac = preset.MIN_AREA_FRAC;
 
   function testPositive(ctrl, t) {
     if (!t) return false;
-    if (t.z < minZ) return false; // 너무 미세한 노이즈 피크 제거
     const absOK = t.z >= absMin;
     const relOK = t.z >= ctrl.z * relMin;
     const areaOK = t.area >= ctrl.area * areaFrac;
-    // 세 가지 조건을 모두 만족할 때만 양성으로 인정 (False Positive 감소용)
+    // 세 가지 조건을 모두 만족해야 양성으로 인정 (노이즈 양성 최소화)
     return absOK && relOK && areaOK;
   }
 
@@ -945,7 +978,14 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   let verdict = "Negative";
   if (mpoPos || ecpPos) verdict = "Positive";
 
-  const confidence = control.z > 1.8 ? "확실" : "보통";
+  let confidence = "보통";
+  const maxTestZ = Math.max(mpo ? mpo.z : 0, ecp ? ecp.z : 0);
+  if (verdict === "Positive" && maxTestZ > absMin + 0.4 && control.z > controlMinZ + 0.2) {
+    confidence = "확실";
+  } else if (control.z < controlMinZ + 0.1 || maxTestZ < absMin + 0.1) {
+    confidence = "약함";
+  }
+
   const detail =
     "C=" +
     control.z.toFixed(2) +
@@ -997,7 +1037,7 @@ export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("auto");
   const [sensitivity, setSensitivity] = useState<Sensitivity>("balanced");
-  const [controlPos, setControlPos] = useState<ControlPos>("right");
+  const [controlPos, setControlPos] = useState<ControlPos>("auto");
   const [requireTwoLines, setRequireTwoLines] = useState(true);
 
   const [result, setResult] = useState<{
@@ -1266,37 +1306,16 @@ export default function LfaAnalyzer() {
     }
   }, [sensitivity, controlPos, requireTwoLines, crop]);
 
-  // 이미지 로드되면 처리 캔버스에 그림 + 기본 Crop 영역 자동 설정 후 바로 분석
+  // 이미지 로드되면 처리 캔버스에 그림 + auto 모드면 자동 분석
   useEffect(() => {
     if (!imageUrl || !imgRef.current) return;
     const img = imgRef.current;
 
     const onLoad = () => {
       drawToProcessCanvas(img);
-
-      // 처리용 캔버스 크기를 기준으로 가운데 부분에 기본 Crop 박스 생성
-      const c = procRef.current;
-      if (c) {
-        const w = c.width;
-        const h = c.height;
-        const marginX = w * 0.05;
-        const cropW = w * 0.9;
-        const cropH = h * 0.3;
-        const cropY = h * 0.35; // 위/아래 여백을 조금 두고 가운데 띠만 선택
-
-        setCrop({
-          x: marginX,
-          y: cropY,
-          w: cropW,
-          h: cropH,
-        });
-
-        // 새 이미지가 들어오면 기본적으로 Crop 모드로 전환
-        setMode("crop");
+      if (mode === "auto") {
+        analyze();
       }
-
-      // 기본 Crop 상자 기준으로 자동 분석 한 번 실행
-      analyze();
     };
 
     if (img.complete) {
@@ -1307,7 +1326,7 @@ export default function LfaAnalyzer() {
         img.removeEventListener("load", onLoad);
       };
     }
-  }, [imageUrl, analyze]);
+  }, [imageUrl, mode, analyze]);
 
   const VerdictBadge = useMemo(() => {
     if (!result) return null;
@@ -1337,10 +1356,10 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">
-        📷 LFA QuickCheck v5.5
+        📷 LFA QuickCheck v5.4
       </h1>
       <p className="text-sm text-gray-600 mb-4">
-        3라인(C + M(MPO) + E(ECP)) 자동 판독 · Web Worker 기반 프리즈 방지 ·
+        3라인(ECP - MPO - C) 자동 판독 · Web Worker 기반 프리즈 방지 ·
         Crop 모드 및 모바일 드래그 지원.
       </p>
 
@@ -1363,8 +1382,7 @@ export default function LfaAnalyzer() {
             <div className="text-5xl">⬆️</div>
             <div className="font-medium">사진 업로드 / 드래그</div>
             <div className="text-xs text-gray-500">
-              팁: 업로드 후 자동으로 C/T 창 중심에 Crop 박스가 잡힙니다.
-              필요하면 박스를 드래그해서 조정한 뒤 다시 “분석”을 눌러 주세요.
+              팁: Crop 모드에서 C/T 창만 박스로 지정하면 더 정확합니다.
             </div>
           </div>
         </label>
@@ -1409,7 +1427,7 @@ export default function LfaAnalyzer() {
         </div>
 
         <div className="flex items-center gap-2">
-          <label className="text-xs text-gray-600">컨트롤 위치</label>
+          <label className="text-xs text-gray-600">컨트롤 위치(설정값)</label>
           <select
             className="px-2 py-1 border rounded-md"
             value={controlPos}
@@ -1468,8 +1486,6 @@ export default function LfaAnalyzer() {
                 "absolute inset-0 w-full h-full object-contain " +
                 (mode === "crop" ? "cursor-crosshair" : "pointer-events-none")
               }
-              // 모바일에서 스크롤 제스처가 드래그를 가로채지 않도록 설정
-              style={{ touchAction: mode === "crop" ? "none" : "auto" }}
             />
           </div>
           <div className="p-2 text-xs text-gray-500">
@@ -1487,7 +1503,7 @@ export default function LfaAnalyzer() {
         <div className="text-sm text-gray-700">
           {result
             ? `${result.detail} · 신뢰도: ${result.confidence}`
-            : "사진을 올리면 가운데 C/T 띠에 기본 Crop 박스가 생기고, 자동으로 한 번 분석합니다."}
+            : "사진을 올리고 ‘분석’을 누르세요. Web Worker로 멈춤 없이 처리됩니다."}
         </div>
 
         {result && (
@@ -1580,4 +1596,3 @@ export default function LfaAnalyzer() {
     </div>
   );
 }
-
