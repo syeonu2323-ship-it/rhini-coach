@@ -721,6 +721,8 @@ function findWindowRect(c) {
   }
   const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
   const a = 255 / Math.max(1, p99 - p1), b = -a * p1;
+  const a = 255 / Math.max(1, p99 - p1) * 1.4;  // contrast 강화
+
   for (let yy = y0; yy <= y1; yy++) {
     for (let xx = x0; xx <= x1; xx++) {
       const k = yy * w + xx;
@@ -915,7 +917,7 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   const minSep = Math.round(unit * preset.MIN_SEP_FRAC);
   const maxSep = Math.round(unit * preset.MAX_SEP_FRAC);
 
-  const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.6);
+  const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.45);
 
   if (!valid.length) {
     return { ok: false, reason: "nopeaks", rect, axis };
@@ -946,50 +948,29 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
     if (!tooCloseToOther) remaining.push(p);
   }
 
-  // 강한 테스트 라인 2개까지만 사용 (노이즈 다중 피크 방지)
-  remaining.sort((a, b) => b.z - a.z);
-  const topTests = remaining.slice(0, 2);
+// --- ECP / MPO 자동 매핑 (Control 기준 거리 기반) ---
+let tECP = null;
+let tMPO = null;
 
-  let t1 = topTests[0] || null;
-  let t2 = topTests[1] || null;
-  let tECP = null;
-  let tMPO = null;
+if (remaining.length >= 2) {
+  const sortedByDist = remaining
+    .map(p => ({
+      peak: p,
+      dist: Math.abs(p.idx - control.idx)
+    }))
+    .sort((a, b) => a.dist - b.dist);
 
-  if (t1 && t2) {
-    const pair = [t1, t2].sort((a, b) => a.idx - b.idx);
-    if (controlPos === "left" || controlPos === "top") {
-      // C - ECP - MPO
-      tECP = pair[0];
-      tMPO = pair[1];
-    } else if (controlPos === "right" || controlPos === "bottom") {
-      // MPO - ECP - C → 반대로 매핑
-      tECP = pair[1];
-      tMPO = pair[0];
-    } else {
-      // auto: C - ECP - MPO 구조가 되도록 맞추기
-      if (control.idx <= pair[0].idx) {
-        tECP = pair[0];
-        tMPO = pair[1];
-      } else if (control.idx >= pair[1].idx) {
-        tECP = pair[0];
-        tMPO = pair[1];
-      } else {
-        const d0 = Math.abs(pair[0].idx - control.idx);
-        const d1 = Math.abs(pair[1].idx - control.idx);
-        if (d0 <= d1) {
-          tECP = pair[0];
-          tMPO = pair[1];
-        } else {
-          tECP = pair[1];
-          tMPO = pair[0];
-        }
-      }
-    }
-  } else if (t1) {
-    // 테스트 라인 1개만 뚜렷할 때: 일단 ECP로 본다(알레르기 단독 양성 시나리오)
-    tECP = t1;
-    tMPO = null;
-  }
+  // Control에 가장 가까운 라인 → ECP
+  tECP = sortedByDist[0].peak;
+
+  // 두 번째로 가까운 라인 → MPO
+  tMPO = sortedByDist[1] ? sortedByDist[1].peak : null;
+
+} else if (remaining.length === 1) {
+  tECP = remaining[0];
+  tMPO = null;
+}
+
 
   const ecpPos = isTestPositive(control, tECP, preset);
   const mpoPos = isTestPositive(control, tMPO, preset);
