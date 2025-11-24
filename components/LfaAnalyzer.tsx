@@ -9,16 +9,14 @@ import React, {
 } from "react";
 
 /**
- * LFA QuickCheck v5.5 (Fully Auto + 3-Line ECP/MPO + Control 위치 기반 매핑)
+ * LFA QuickCheck v5.4.2 (완전 자동 튜닝: 중앙 ROI + 보수적 T라인 필터)
  *
+ * - 3라인: ECP - MPO - Control (사진 기준 왼→오) 구조에 맞춘 분석
  * - Web Worker로 무거운 연산 분리 → 메인 프리즈 최소화
  * - 대용량 이미지 자동 축소(최대 1400px)
- * - Crop 모드(마우스/터치 드래그)로 로고·여백 제외하고 C/T 창만 분석 가능
- * - 3라인 구조: ECP – MPO – Control(오른쪽/아래쪽) 키트에 맞게 라인 매핑
- *   - Control = ROI 기준 오른쪽/아래쪽 쪽에 위치한 peak + 충분한 강도
- *   - 테스트 라인(ECP/MPO)은 Control 기준 상대 위치로 자동 구분
- * - Control 라인이 없거나 오른쪽 영역에 충분히 강한 peak가 없으면 즉시 무효 처리
- * - 테스트 라인 양성 기준 완화 (실제 MPO/ECP만 잘 잡히도록)
+ * - 자동 모드에서도 카드 가장자리/로고/배경 노이즈를 최대한 배제
+ * - Control 라인이 충분히 진하지 않으면 바로 "무효"
+ * - Test 라인(ECP/MPO)은 C 대비 충분히 진하고 넓은 피크만 "양성"으로 인정
  */
 
 type Verdict = "Positive" | "Negative" | "Invalid";
@@ -418,10 +416,7 @@ const SymptomLogger: React.FC<{ defaultVerdict?: Verdict }> = ({
           <div className="font-medium text-sm mb-2">🗂 최근 기록</div>
           <div className="flex flex-col gap-2 text-xs">
             {recent.slice(0, 6).map((r, i) => (
-              <div
-                key={i}
-                className="flex items-start justify-between gap-3"
-              >
+              <div key={i} className="flex items-start justify-between gap-3">
                 <div className="flex-1">
                   <div className="text-gray-800">{r.text}</div>
                   <div className="text-gray-500">{fmt(r.ts)}</div>
@@ -628,34 +623,93 @@ function drawRotatedToCanvas(bitmap, deg, maxSide = 1400) {
   return rot;
 }
 
-// 완전 자동 ROI: 중앙 영역 위주 + 대비 보정
 function findWindowRect(c) {
   const ctx = c.getContext("2d");
   const w = c.width, h = c.height;
   const img = ctx.getImageData(0, 0, w, h).data;
 
   const br = new Float32Array(w * h);
+  const sat = new Float32Array(w * h);
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       const R = img[i], G = img[i + 1], B = img[i + 2];
+      const max = Math.max(R, G, B), min = Math.min(R, G, B);
       br[y * w + x] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+      sat[y * w + x] = max === 0 ? 0 : (max - min) / max;
     }
   }
 
-  // 우선 가운데 큰 박스로 기본 ROI 선정 (로고/테두리 제거)
-  let x0 = Math.round(w * 0.15);
-  let x1 = Math.round(w * 0.85);
-  let y0 = Math.round(h * 0.20);
-  let y1 = Math.round(h * 0.80);
+  const col = new Float32Array(w), row = new Float32Array(h);
+  for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let y = 0; y < h; y++) s += br[y * w + x];
+    col[x] = s / h;
+  }
+  for (let y = 0; y < h; y++) {
+    let s = 0;
+    for (let x = 0; x < w; x++) s += br[y * w + x];
+    row[y] = s / w;
+  }
 
-  x0 = clamp(x0, 0, w - 2);
-  x1 = clamp(x1, 1, w - 1);
-  y0 = clamp(y0, 0, h - 2);
-  y1 = clamp(y1, 1, h - 1);
+  const dcol = movingAverage(
+    Array.from(col).map((v, i) => (i ? Math.abs(v - col[i - 1]) : 0)),
+    Math.max(9, Math.floor(w / 40))
+  );
+  const drow = movingAverage(
+    Array.from(row).map((v, i) => (i ? Math.abs(v - row[i - 1]) : 0)),
+    Math.max(9, Math.floor(h / 40))
+  );
 
-  // Glare/암부 마스크
+  const thx = quantile(dcol, 0.9), thy = quantile(drow, 0.9);
+
+  const xs = [];
+  for (let i = 1; i < w - 1; i++) {
+    if (dcol[i] > thx && dcol[i] >= dcol[i - 1] && dcol[i] > dcol[i + 1]) xs.push(i);
+  }
+  const ys = [];
+  for (let i = 1; i < h - 1; i++) {
+    if (drow[i] > thy && drow[i] >= drow[i - 1] && drow[i] > drow[i + 1]) ys.push(i);
+  }
+
+  const pick = (arr, N) => {
+    if (arr.length < 2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
+    let L = arr[0], R = arr[arr.length - 1], gap = R - L;
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const g = arr[j] - arr[i];
+        if (g > gap) {
+          gap = g;
+          L = arr[i];
+          R = arr[j];
+        }
+      }
+    }
+    if (gap < N * 0.2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
+    return [L, R];
+  };
+
+  let tmp = pick(xs, w);
+  let x0 = tmp[0], x1 = tmp[1];
+  tmp = pick(ys, h);
+  let y0 = tmp[0], y1 = tmp[1];
+
+  const padX = Math.round((x1 - x0) * 0.03);
+  const padY = Math.round((y1 - y0) * 0.05);
+  x0 = clamp(x0 + padX, 0, w - 2);
+  x1 = clamp(x1 - padX, 1, w - 1);
+  y0 = clamp(y0 + padY, 0, h - 2);
+  y1 = clamp(y1 - padY, 1, h - 1);
+
+  // 추가: 전체 이미지 기준으로도 중앙부만 남기기 (로고·여백·손가락 제거용)
+  const gPadX = Math.round(w * 0.14);
+  const gPadY = Math.round(h * 0.18);
+  x0 = clamp(Math.max(x0, gPadX), 0, w - 2);
+  x1 = clamp(Math.min(x1, w - 1 - gPadX), 1, w - 1);
+  y0 = clamp(Math.max(y0, gPadY), 0, h - 2);
+  y1 = clamp(Math.min(y1, h - 1 - gPadY), 1, h - 1);
+
   const glareMask = new Uint8Array(w * h);
   const brHi = quantile(br, 0.965), brLo = quantile(br, 0.05);
   for (let i = 0; i < w * h; i++) {
@@ -663,7 +717,6 @@ function findWindowRect(c) {
     if (br[i] < brLo * 0.6) glareMask[i] = 1;
   }
 
-  // ROI 안에서 대비 보정
   const win = [];
   for (let yy = y0; yy <= y1; yy++) {
     for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
@@ -758,7 +811,6 @@ function peaksFromProfile(arr) {
   return { z, peaks, quality };
 }
 
-// ECP–MPO–Control 구조를 가정한 자동 매핑
 function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   const angles = [];
   for (let a = -18; a <= 18; a += 2) angles.push(a);
@@ -786,12 +838,15 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
     const img = octx.getImageData(0, 0, w, h);
     const data = img.data;
     const br = new Float32Array(w * h);
+    const sat = new Float32Array(w * h);
 
     for (let yy = 0; yy < h; yy++) {
       for (let xx = 0; xx < w; xx++) {
         const i = (yy * w + xx) * 4;
         const R = data[i], G = data[i + 1], B = data[i + 2];
+        const max = Math.max(R, G, B), min = Math.min(R, G, B);
         br[yy * w + xx] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+        sat[yy * w + xx] = max === 0 ? 0 : (max - min) / max;
       }
     }
 
@@ -837,100 +892,74 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   }
 
   const sel = axis === "x" ? px : py;
-  const unit = Math.max(1, axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0);
+  const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
   const preset = PRESETS[sensitivity];
 
   const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
-  const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.4);
+  const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.45);
 
   if (!valid.length) {
     return { ok: false, reason: "nopeaks", rect, axis };
   }
 
-  // ---- ECP–MPO–Control 자동 매핑 ----
-  // 1) Control 후보: ROI 오른쪽/아래쪽 영역(전체 길이의 55% 이후)에 있는 peak 중 가장 강한 것
-  const labeled = valid.map((p) => ({
-    ...p,
-    pos: p.idx / unit,
-  }));
+  // Control 후보 선택 (위치 힌트 + 가장 강한 peak)
+  let control = null;
 
-  let controlCandidates = labeled.filter((p) => p.pos >= 0.55);
-
-  // controlPos 옵션이 지정되면, 해당 방향 쪽 peak를 우선적으로 본다
-  if (controlPos === "left") {
-    controlCandidates = labeled.filter((p) => p.pos <= 0.45);
-  } else if (controlPos === "right") {
-    controlCandidates = labeled.filter((p) => p.pos >= 0.55);
-  } else if (controlPos === "top") {
-    controlCandidates = labeled.filter((p) => p.pos <= 0.45);
-  } else if (controlPos === "bottom") {
-    controlCandidates = labeled.filter((p) => p.pos >= 0.55);
+  if (controlPos !== "auto") {
+    const dir =
+      controlPos === "left" || controlPos === "top"
+        ? "nearStart"
+        : "nearEnd";
+    const sortedByIdx = valid.slice().sort((a, b) => a.idx - b.idx);
+    if (dir === "nearStart") {
+      control = sortedByIdx
+        .slice(0, Math.max(2, Math.round(sortedByIdx.length * 0.4)))
+        .sort((a, b) => b.z - a.z)[0];
+    } else {
+      control = sortedByIdx
+        .slice(-Math.max(2, Math.round(sortedByIdx.length * 0.4)))
+        .sort((a, b) => b.z - a.z)[0];
+    }
   }
 
-  if (!controlCandidates.length) {
+  if (!control) {
+    control = valid.slice().sort((a, b) => b.z - a.z)[0];
+  }
+
+  // Control 자체가 충분히 강하지 않으면 무효
+  if (!control || control.z < preset.CONTROL_MIN) {
     return { ok: false, reason: "noControl", rect, axis };
   }
 
-  const control = controlCandidates.slice().sort((a, b) => b.z - a.z)[0];
+  const minSep = preset.MIN_SEP_FRAC * 0.9;
+  const maxSep = preset.MAX_SEP_FRAC * 1.05;
 
-  if (!control || control.z < preset.CONTROL_MIN * 0.7) {
-    return { ok: false, reason: "noControl", rect, axis };
-  }
+  // C 라인에서 너무 멀거나 너무 가까운 peak(배경/노이즈)는 테스트 라인 후보에서 제거
+  const tests = valid.filter((p) => {
+    if (p === control) return false;
+    const d = Math.abs(p.idx - control.idx) / unit;
+    return d >= minSep && d <= maxSep;
+  });
 
-  const testsRaw = labeled.filter((p) => p.idx !== control.idx);
+  const testsByDist = tests
+    .map((p) => ({ peak: p, dist: Math.abs(p.idx - control.idx) }))
+    .sort((a, b) => a.dist - b.dist);
 
-  // 테스트 라인이 하나도 없고, requireTwoLines가 true면 "테스트 없음" 처리 (Negative + 진단 없음)
-  const absMin = preset.TEST_MIN_ABS * 0.75;
-  const relMin = preset.TEST_MIN_REL * 0.75;
-  const areaFrac = preset.MIN_AREA_FRAC * 0.9;
+  let mpo = testsByDist[0] ? testsByDist[0].peak : null;
+  let ecp = testsByDist[1] ? testsByDist[1].peak : null;
+
+  const absMin = preset.TEST_MIN_ABS;
+  const relMin = preset.TEST_MIN_REL;
+  const areaFrac = preset.MIN_AREA_FRAC;
 
   function testPositive(ctrl, t) {
     if (!t) return false;
     const absOK = t.z >= absMin;
     const relOK = t.z >= ctrl.z * relMin;
     const areaOK = t.area >= ctrl.area * areaFrac;
-    const distFrac = Math.abs(t.idx - ctrl.idx) / unit;
-    const distOK = distFrac >= preset.MIN_SEP_FRAC * 0.6 && distFrac <= preset.MAX_SEP_FRAC * 1.4;
-    return areaOK && (absOK || relOK) && distOK;
+    // 테스트 라인은 반드시 충분히 넓고(면적) 진해야 함 — 약한 노이즈 peak는 모두 제거
+    return areaOK && (absOK || relOK);
   }
-
-  if (!testsRaw.length && requireTwoLines) {
-    const detail =
-      "C=" + control.z.toFixed(2) + ", MPO=0.00, ECP=0.00 (테스트 라인 미검출)";
-    return {
-      ok: true,
-      result: {
-        verdict: "Negative",
-        detail,
-        confidence: "보통",
-        diagnosis: "none",
-        ecpPositive: false,
-        mpoPositive: false,
-      },
-    };
-  }
-
-  // 2) Control 기준 상대 위치로 ECP / MPO 구분
-  const ctrlPos = control.pos; // 0~1
-  const ecpCandidates = [];
-  const mpoCandidates = [];
-
-  for (const t of testsRaw) {
-    const rel = t.pos / Math.max(0.01, ctrlPos); // Control 대비 상대 위치
-    const distFrac = Math.abs(t.idx - control.idx) / unit;
-    if (distFrac < preset.MIN_SEP_FRAC * 0.5 || distFrac > preset.MAX_SEP_FRAC * 1.6) {
-      continue; // 너무 가깝거나 너무 멀면 노이즈로 처리
-    }
-    // 대략 Control 대비 0.2~0.5 지점 → ECP, 그 이후 0.5~0.9 지점 → MPO
-    if (rel <= 0.55) {
-      ecpCandidates.push(t);
-    } else {
-      mpoCandidates.push(t);
-    }
-  }
-
-  const ecp = ecpCandidates.sort((a, b) => b.z - a.z)[0] || null;
-  const mpo = mpoCandidates.sort((a, b) => b.z - a.z)[0] || null;
 
   const mpoPos = testPositive(control, mpo);
   const ecpPos = testPositive(control, ecp);
@@ -943,13 +972,7 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   let verdict = "Negative";
   if (mpoPos || ecpPos) verdict = "Positive";
 
-  let confidence = "보통";
-  if (control.z > 1.8 && ((mpo && mpo.z > 1.5) || (ecp && ecp.z > 1.5))) {
-    confidence = "확실";
-  } else if (control.z < 1.2) {
-    confidence = "약함";
-  }
-
+  const confidence = control.z > 1.8 ? "확실" : "보통";
   const detail =
     "C=" +
     control.z.toFixed(2) +
@@ -1248,7 +1271,7 @@ export default function LfaAnalyzer() {
         setResult({
           verdict: "Invalid",
           detail:
-            "컨트롤 라인이 인식되지 않았습니다. (실제 키트 결과가 무효이거나, C라인이 잘리지 않게 촬영해 주세요.)",
+            "컨트롤 라인이 인식되지 않았습니다. 키트 결과 자체가 무효일 수 있습니다.",
           confidence: "약함",
         });
       } else {
@@ -1321,11 +1344,11 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">
-        📷 LFA QuickCheck v5.5
+        📷 LFA QuickCheck v5.4.2
       </h1>
       <p className="text-sm text-gray-600 mb-4">
-        3라인(ECP – MPO – Control) 자동 판독 · Web Worker 기반 프리즈 방지 ·
-        완전 자동 ROI + Crop 모드 및 모바일 드래그 지원.
+        3라인(ECP - MPO - C) 전용 자동 판독 · Web Worker 기반 프리즈 방지 ·
+        중앙 ROI 자동 선택 + Crop 모드 및 모바일 드래그 지원.
       </p>
 
       <div
@@ -1400,11 +1423,11 @@ export default function LfaAnalyzer() {
               setControlPos(e.target.value as ControlPos)
             }
           >
-            <option value="auto">자동(ECP–MPO–C 가정)</option>
-            <option value="left">왼쪽이 C</option>
-            <option value="right">오른쪽이 C</option>
-            <option value="top">위쪽이 C</option>
-            <option value="bottom">아래쪽이 C</option>
+            <option value="auto">자동</option>
+            <option value="left">왼쪽(C - M - E)</option>
+            <option value="right">오른쪽(E - M - C)</option>
+            <option value="top">위쪽(C - M - E)</option>
+            <option value="bottom">아래쪽(E - M - C)</option>
           </select>
         </div>
 
@@ -1414,7 +1437,7 @@ export default function LfaAnalyzer() {
             checked={requireTwoLines}
             onChange={(e) => setRequireTwoLines(e.target.checked)}
           />
-          두 줄 요구(T 없으면 음성) — 2라인 키트용 옵션(3라인에선 테스트 없으면 음성 처리)
+          두 줄 요구(T 없으면 음성) — 2라인 키트용 옵션(3라인에선 영향 거의 없음)
         </label>
       </div>
 
