@@ -591,8 +591,10 @@ export default function LfaAnalyzer() {
   // ---------------- Crop 드래그 (PC) -------------------
   useEffect(() => {
     const ov = overlayRef.current;
-    if (!ov) return;
-    if (!ctxO) return;
+if (!ov) return;
+const ctxO = ov.getContext("2d");
+if (!ctxO) return;
+
 
     const mdown = (ev: MouseEvent) => {
       if (mode !== "crop") return;
