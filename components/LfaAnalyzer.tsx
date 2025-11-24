@@ -720,8 +720,10 @@ function findWindowRect(c) {
     for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
   }
   const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
-  const a = 255 / Math.max(1, p99 - p1), b = -a * p1;
-  const a = 255 / Math.max(1, p99 - p1) * 1.4;  // contrast 강화
+let a = 255 / Math.max(1, p99 - p1);
+const b = -a * p1;
+a = a * 1.4;   // contrast 강화
+
 
   for (let yy = y0; yy <= y1; yy++) {
     for (let xx = x0; xx <= x1; xx++) {
