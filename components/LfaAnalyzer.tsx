@@ -9,16 +9,21 @@ import React, {
 } from "react";
 
 /**
- * LFA QuickCheck v5.4 (Worker + Crop + 3-Line ECP/MPO, C/M/E 전용 튜닝)
+ * LFA QuickCheck v5.4 (Worker + Crop + 3-Line ECP/MPO, ECP-MPO-C 전용 튜닝)
  *
  * - Web Worker로 무거운 연산 분리 → 메인 프리즈 최소화
  * - 대용량 이미지 자동 축소(최대 1400px)
  * - Crop 모드(마우스/터치 드래그)로 로고·여백 제외하고 C/T 창만 분석
- * - 3라인 구조: C + M(MPO) + E(ECP) 고정형 키트에 맞게 라인 매핑
- *   - Control(가장 강한 peak) 기준으로 거리 가까운 순:
- *     ① MPO, ② ECP 로 인식
+ * - 3라인 구조: E(ECP) - M(MPO) - C(Control) 순 키트에 맞게 라인 매핑
+ *   - Control(오른쪽 끝 라인, 또는 가장 강한 peak) 기준으로 거리 가까운 순:
+ *     ① MPO(가운데), ② ECP(가장 바깥쪽)로 인식
  * - Control 라인이 없거나 매우 약하면 즉시 무효 처리
  * - 테스트 라인 양성 기준 완화 (실제 MPO/ECP만 잘 잡히도록)
+ *
+ * - 진단 규칙:
+ *   · ECP만 양성  → allergic (알레르기성 비염 패턴)
+ *   · MPO만 양성  → bacterial (세균성 비염 패턴)
+ *   · ECP+MPO 둘 다 양성 → mixed (혼합형 비염 패턴)
  */
 
 type Verdict = "Positive" | "Negative" | "Invalid";
@@ -899,10 +904,28 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
     return { ok: false, reason: "nopeaks", rect, axis };
   }
 
-  // Control = 가장 강한 peak
-  const control = valid.slice().sort((a, b) => b.z - a.z)[0];
+  // Control 선택: 위치 힌트(controlPos) + 강도
+  let control = null;
+  if (controlPos !== "auto") {
+    if (axis === "x" && (controlPos === "left" || controlPos === "right")) {
+      control =
+        controlPos === "left"
+          ? valid.reduce((min, p) => (p.idx < min.idx ? p : min), valid[0])
+          : valid.reduce((max, p) => (p.idx > max.idx ? p : max), valid[0]);
+    } else if (axis === "y" && (controlPos === "top" || controlPos === "bottom")) {
+      control =
+        controlPos === "top"
+          ? valid.reduce((min, p) => (p.idx < min.idx ? p : min), valid[0])
+          : valid.reduce((max, p) => (p.idx > max.idx ? p : max), valid[0]);
+    }
+  }
+  if (!control) {
+    // 위치 힌트가 없으면 가장 강한 peak를 Control 후보로
+    control = valid.slice().sort((a, b) => b.z - a.z)[0];
+  }
 
-  if (!control || control.z < 0.8) {
+  // Control 자체가 충분히 강하지 않으면 무효 (첫 번째 사진: 컨트롤 없음 → 여기서 걸러짐)
+  if (!control || control.z < preset.CONTROL_MIN) {
     return { ok: false, reason: "noControl", rect, axis };
   }
 
@@ -912,6 +935,7 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
     .map((p) => ({ peak: p, dist: Math.abs(p.idx - control.idx) }))
     .sort((a, b) => a.dist - b.dist);
 
+  // Control에서 가까운 순: ① MPO(가운데), ② ECP(바깥)
   let mpo = testsByDist[0] ? testsByDist[0].peak : null;
   let ecp = testsByDist[1] ? testsByDist[1].peak : null;
 
@@ -930,6 +954,7 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   const mpoPos = testPositive(control, mpo);
   const ecpPos = testPositive(control, ecp);
 
+  // 진단 규칙: ECP만 양성 / MPO만 양성 / 둘 다 양성
   let diagnosis = "none";
   if (mpoPos && ecpPos) diagnosis = "mixed";
   else if (mpoPos) diagnosis = "bacterial";
@@ -990,7 +1015,8 @@ export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("auto");
   const [sensitivity, setSensitivity] = useState<Sensitivity>("balanced");
-  const [controlPos, setControlPos] = useState<ControlPos>("auto");
+  // 👉 실제 키트가 ECP-MPO-Control(오른쪽 끝이 C)이니까 기본값을 right로
+  const [controlPos, setControlPos] = useState<ControlPos>("right");
   const [requireTwoLines, setRequireTwoLines] = useState(true);
 
   const [result, setResult] = useState<{
@@ -1236,7 +1262,8 @@ export default function LfaAnalyzer() {
       } else if (res.reason === "noControl") {
         setResult({
           verdict: "Invalid",
-          detail: "컨트롤 라인이 인식되지 않았습니다. 키트 결과 자체가 무효일 수 있습니다.",
+          detail:
+            "컨트롤 라인이 인식되지 않았습니다. 키트 결과 자체가 무효일 수 있습니다.",
           confidence: "약함",
         });
       } else {
@@ -1312,7 +1339,7 @@ export default function LfaAnalyzer() {
         📷 LFA QuickCheck v5.4
       </h1>
       <p className="text-sm text-gray-600 mb-4">
-        3라인(C + M(MPO) + E(ECP)) 자동 판독 · Web Worker 기반 프리즈 방지 ·
+        3라인(ECP - MPO - Control) 자동 판독 · Web Worker 기반 프리즈 방지 ·
         Crop 모드 및 모바일 드래그 지원.
       </p>
 
