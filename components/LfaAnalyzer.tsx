@@ -1400,14 +1400,25 @@ export default function LfaAnalyzer() {
         onDragOver={stopDrag}
         className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50"
       >
-        <label className="w-full cursor-pointer">
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-            onChange={onInput}
-          />
+        <label
+  htmlFor="mobileCameraInput"
+  className="w-full cursor-pointer"
+  onClick={() => {
+    const input = document.getElementById("mobileCameraInput") as HTMLInputElement;
+    if (input) input.click();
+  }}
+>
+  <input
+    id="mobileCameraInput"
+    type="file"
+    accept="image/*"
+    capture="environment"
+    className="hidden"
+    onChange={onInput}
+    multiple={false}
+  />
+
+
           <div className="flex flex-col items-center gap-1">
             <div className="text-5xl">⬆️</div>
             <div className="font-medium">사진 업로드 / 드래그</div>
