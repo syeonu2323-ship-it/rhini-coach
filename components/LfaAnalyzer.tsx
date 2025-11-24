@@ -277,12 +277,12 @@ function validateControl(control: Peak | null, peaks: Peak[], preset: any, unit:
   return true;
 }
 /* ------------------------------------
-   Web Worker 코드 (자동 판독 엔진)
+   Web Worker 코드 (자동 판독 엔진) - TypeScript Safe
 ------------------------------------ */
 const workerCode = () => {
   // Peak 계산 함수
-  function compute_peaks(arr, h) {
-    const peaks = [];
+  function compute_peaks(arr: Float32Array, h: number) {
+    const peaks: { idx: number; z: number; width: number; area: number }[] = [];
     const n = arr.length;
     const TH = 1.0;
 
@@ -320,19 +320,19 @@ const workerCode = () => {
 
     if (rising) {
       const area = peakZ - base;
-      const width = 1;
       if (area > 0.2) {
-        peaks.push({ idx: peakIdx, z: peakZ, width, area });
+        peaks.push({ idx: peakIdx, z: peakZ, width: 1, area });
       }
     }
     return peaks;
   }
 
   // z-score 계산
-  function zScoreLine(v) {
+  function zScoreLine(v: Float32Array): Float32Array {
     const n = v.length;
     let sum = 0;
     for (let x of v) sum += x;
+
     const mean = sum / n;
 
     let ss = 0;
@@ -343,17 +343,21 @@ const workerCode = () => {
 
     const sd = Math.sqrt(ss / n);
     const zarr = new Float32Array(n);
-    const eps = sd > 1e-5 ? 1.0 / sd : 0;
+    const inv = sd > 1e-5 ? 1 / sd : 0;
 
     for (let i = 0; i < n; i++) {
-      zarr[i] = (v[i] - mean) * eps;
+      zarr[i] = (v[i] - mean) * inv;
     }
 
     return zarr;
   }
 
   // Core 분석 로직
-  function analyzeCore(imageData, rect, config) {
+  function analyzeCore(
+    imageData: ImageData,
+    rect: { x0: number; y0: number; x1: number; y1: number },
+    config: any
+  ) {
     const { sensitivity, controlPos } = config;
     const preset = config.presets[sensitivity];
 
@@ -372,12 +376,11 @@ const workerCode = () => {
     for (let x = 0; x < w2; x++) {
       let sum = 0;
       for (let y = 0; y < h2; y++) {
-        const idx = (y * w2 + x) * 4;
+        const idx = ((y0 + y) * imageData.width + (x0 + x)) * 4;
         const r = imageData.data[idx];
         const g = imageData.data[idx + 1];
         const b = imageData.data[idx + 2];
-        const v = (r + g + b) / 3;
-        sum += v;
+        sum += (r + g + b) / 3;
       }
       line[x] = sum / h2;
     }
@@ -402,21 +405,21 @@ const workerCode = () => {
     const sorted = peaks.slice().sort((a, b) => a.idx - b.idx);
     const unit = w2;
 
-    let control = null;
+    // control 선택
+    let control = null as null | (typeof sorted)[number];
     if (controlPos === "auto") {
-      control = sorted.reduce((mx, p) => (p.z > mx.z ? p : mx), sorted[0]);
+      control = sorted.reduce((mx, p) => (p.z > (mx?.z ?? 0) ? p : mx), sorted[0]);
     } else {
-      if (controlPos === "left") {
-        control = sorted[0];
-      } else if (controlPos === "right") {
-        control = sorted[sorted.length - 1];
-      } else {
-        control = sorted.reduce((mx, p) => (p.z > mx.z ? p : mx), sorted[0]);
-      }
+      control = sorted[0];
     }
 
     // Control 강화 검증
-    function validateControlLocal(controlPeak, peaks, preset, unit) {
+    function validateControlLocal(
+      controlPeak: { idx: number; z: number; width: number; area: number } | null,
+      peaks: typeof sorted,
+      preset: any,
+      unit: number
+    ) {
       if (!controlPeak) return false;
       if (controlPeak.z < preset.CONTROL_MIN) return false;
 
@@ -433,12 +436,7 @@ const workerCode = () => {
       return true;
     }
 
-    const isControlValid = validateControlLocal(
-      control,
-      sorted,
-      preset,
-      unit
-    );
+    const isControlValid = validateControlLocal(control, sorted, preset, unit);
 
     if (!isControlValid) {
       return {
@@ -473,32 +471,29 @@ const workerCode = () => {
     const t1 = tCandidates[0] || null;
     const t2 = tCandidates[1] || null;
 
-    const positiveLine = (peak) => {
+    const positiveLine = (peak: any) => {
       if (!peak) return false;
       if (peak.z < preset.TEST_MIN_ABS) return false;
-      if (peak.z < control.z * preset.TEST_MIN_REL) return false;
+      if (peak.z < control!.z * preset.TEST_MIN_REL) return false;
       return true;
     };
 
     const cIdx = control.idx;
-    let ecpLine = null;
-    let mpoLine = null;
+    let ecpLine = t1;
+    let mpoLine = t2;
 
     if (t1 && t2) {
       const d1 = Math.abs(t1.idx - cIdx);
       const d2 = Math.abs(t2.idx - cIdx);
       ecpLine = d1 < d2 ? t1 : t2;
       mpoLine = ecpLine === t1 ? t2 : t1;
-    } else {
-      ecpLine = t1;
-      mpoLine = null;
     }
 
     const ecpPos = positiveLine(ecpLine);
     const mpoPos = positiveLine(mpoLine);
 
-    let verdict = "Invalid";
-    let diagnosis = "none";
+    let verdict: "Positive" | "Negative" | "Invalid" = "Invalid";
+    let diagnosis: Diagnosis = "none";
 
     if (ecpPos && mpoPos) {
       verdict = "Positive";
@@ -537,6 +532,7 @@ const workerCode = () => {
     }
   };
 };
+
 
 /* ------------------------------------
    메인 리액트 컴포넌트 (UI + Worker 연결)
@@ -596,7 +592,6 @@ export default function LfaAnalyzer() {
   useEffect(() => {
     const ov = overlayRef.current;
     if (!ov) return;
-    const ctxO = ov.getContext("2d");
     if (!ctxO) return;
 
     const mdown = (ev: MouseEvent) => {
