@@ -9,14 +9,17 @@ import React, {
 } from "react";
 
 /**
- * LFA QuickCheck v5.4.2 (완전 자동 튜닝: 중앙 ROI + 보수적 T라인 필터)
+ * LFA QuickCheck v5.5 (Worker + Crop + 3-Line ECP/MPO, C/M/E 전용 튜닝 강화)
  *
- * - 3라인: ECP - MPO - Control (사진 기준 왼→오) 구조에 맞춘 분석
  * - Web Worker로 무거운 연산 분리 → 메인 프리즈 최소화
  * - 대용량 이미지 자동 축소(최대 1400px)
- * - 자동 모드에서도 카드 가장자리/로고/배경 노이즈를 최대한 배제
- * - Control 라인이 충분히 진하지 않으면 바로 "무효"
- * - Test 라인(ECP/MPO)은 C 대비 충분히 진하고 넓은 피크만 "양성"으로 인정
+ * - Crop 모드(마우스/터치 드래그)로 로고·여백 제외하고 C/T 창만 분석
+ * - 3라인 구조: C + M(MPO) + E(ECP) 고정형 키트에 맞게 라인 매핑
+ *   - Control(가장 강한 peak) 기준으로 거리 가까운 순:
+ *     ① MPO, ② ECP 로 인식
+ * - Control 라인이 없거나 매우 약하면 즉시 무효 처리
+ * - 테스트 라인 양성 기준을 훨씬 보수적으로 설정해서
+ *   실제 ECP/MPO 진짜 라인만 잡히도록 튜닝
  */
 
 type Verdict = "Positive" | "Negative" | "Invalid";
@@ -416,7 +419,10 @@ const SymptomLogger: React.FC<{ defaultVerdict?: Verdict }> = ({
           <div className="font-medium text-sm mb-2">🗂 최근 기록</div>
           <div className="flex flex-col gap-2 text-xs">
             {recent.slice(0, 6).map((r, i) => (
-              <div key={i} className="flex items-start justify-between gap-3">
+              <div
+                key={i}
+                className="flex items-start justify-between gap-3"
+              >
                 <div className="flex-1">
                   <div className="text-gray-800">{r.text}</div>
                   <div className="text-gray-500">{fmt(r.ts)}</div>
@@ -702,14 +708,6 @@ function findWindowRect(c) {
   y0 = clamp(y0 + padY, 0, h - 2);
   y1 = clamp(y1 - padY, 1, h - 1);
 
-  // 추가: 전체 이미지 기준으로도 중앙부만 남기기 (로고·여백·손가락 제거용)
-  const gPadX = Math.round(w * 0.14);
-  const gPadY = Math.round(h * 0.18);
-  x0 = clamp(Math.max(x0, gPadX), 0, w - 2);
-  x1 = clamp(Math.min(x1, w - 1 - gPadX), 1, w - 1);
-  y0 = clamp(Math.max(y0, gPadY), 0, h - 2);
-  y1 = clamp(Math.min(y1, h - 1 - gPadY), 1, h - 1);
-
   const glareMask = new Uint8Array(w * h);
   const brHi = quantile(br, 0.965), brLo = quantile(br, 0.05);
   for (let i = 0; i < w * h; i++) {
@@ -895,51 +893,24 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
   const preset = PRESETS[sensitivity];
 
+  const controlMin = preset.CONTROL_MIN;
   const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
-  const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.45);
+  const valid = sel.peaks.filter(
+    (p) => p.width <= maxWidth && p.z > controlMin * 0.4
+  );
 
   if (!valid.length) {
     return { ok: false, reason: "nopeaks", rect, axis };
   }
 
-  // Control 후보 선택 (위치 힌트 + 가장 강한 peak)
-  let control = null;
+  // Control = 가장 강한 peak
+  const control = valid.slice().sort((a, b) => b.z - a.z)[0];
 
-  if (controlPos !== "auto") {
-    const dir =
-      controlPos === "left" || controlPos === "top"
-        ? "nearStart"
-        : "nearEnd";
-    const sortedByIdx = valid.slice().sort((a, b) => a.idx - b.idx);
-    if (dir === "nearStart") {
-      control = sortedByIdx
-        .slice(0, Math.max(2, Math.round(sortedByIdx.length * 0.4)))
-        .sort((a, b) => b.z - a.z)[0];
-    } else {
-      control = sortedByIdx
-        .slice(-Math.max(2, Math.round(sortedByIdx.length * 0.4)))
-        .sort((a, b) => b.z - a.z)[0];
-    }
-  }
-
-  if (!control) {
-    control = valid.slice().sort((a, b) => b.z - a.z)[0];
-  }
-
-  // Control 자체가 충분히 강하지 않으면 무효
-  if (!control || control.z < preset.CONTROL_MIN) {
+  if (!control || control.z < controlMin) {
     return { ok: false, reason: "noControl", rect, axis };
   }
 
-  const minSep = preset.MIN_SEP_FRAC * 0.9;
-  const maxSep = preset.MAX_SEP_FRAC * 1.05;
-
-  // C 라인에서 너무 멀거나 너무 가까운 peak(배경/노이즈)는 테스트 라인 후보에서 제거
-  const tests = valid.filter((p) => {
-    if (p === control) return false;
-    const d = Math.abs(p.idx - control.idx) / unit;
-    return d >= minSep && d <= maxSep;
-  });
+  const tests = valid.filter((p) => p !== control);
 
   const testsByDist = tests
     .map((p) => ({ peak: p, dist: Math.abs(p.idx - control.idx) }))
@@ -948,17 +919,19 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   let mpo = testsByDist[0] ? testsByDist[0].peak : null;
   let ecp = testsByDist[1] ? testsByDist[1].peak : null;
 
-  const absMin = preset.TEST_MIN_ABS;
-  const relMin = preset.TEST_MIN_REL;
-  const areaFrac = preset.MIN_AREA_FRAC;
+  const absMin = preset.TEST_MIN_ABS;       // 더 보수적으로: 절대 기준 그대로 사용
+  const relMin = preset.TEST_MIN_REL;       // 상대 기준도 그대로 사용
+  const areaFrac = preset.MIN_AREA_FRAC;    // 면적 기준도 완화 없이 사용
+  const minZ = 1.0;                         // z-score가 1.0 이상인 피크만 테스트 라인 후보
 
   function testPositive(ctrl, t) {
     if (!t) return false;
+    if (t.z < minZ) return false; // 너무 미세한 노이즈 피크 제거
     const absOK = t.z >= absMin;
     const relOK = t.z >= ctrl.z * relMin;
     const areaOK = t.area >= ctrl.area * areaFrac;
-    // 테스트 라인은 반드시 충분히 넓고(면적) 진해야 함 — 약한 노이즈 peak는 모두 제거
-    return areaOK && (absOK || relOK);
+    // 세 가지 조건을 모두 만족할 때만 양성으로 인정 (False Positive 감소용)
+    return absOK && relOK && areaOK;
   }
 
   const mpoPos = testPositive(control, mpo);
@@ -1024,7 +997,7 @@ export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("auto");
   const [sensitivity, setSensitivity] = useState<Sensitivity>("balanced");
-  const [controlPos, setControlPos] = useState<ControlPos>("auto");
+  const [controlPos, setControlPos] = useState<ControlPos>("right");
   const [requireTwoLines, setRequireTwoLines] = useState(true);
 
   const [result, setResult] = useState<{
@@ -1270,8 +1243,7 @@ export default function LfaAnalyzer() {
       } else if (res.reason === "noControl") {
         setResult({
           verdict: "Invalid",
-          detail:
-            "컨트롤 라인이 인식되지 않았습니다. 키트 결과 자체가 무효일 수 있습니다.",
+          detail: "컨트롤 라인이 인식되지 않았습니다. 키트 결과 자체가 무효일 수 있습니다.",
           confidence: "약함",
         });
       } else {
@@ -1294,16 +1266,37 @@ export default function LfaAnalyzer() {
     }
   }, [sensitivity, controlPos, requireTwoLines, crop]);
 
-  // 이미지 로드되면 처리 캔버스에 그림 + auto 모드면 자동 분석
+  // 이미지 로드되면 처리 캔버스에 그림 + 기본 Crop 영역 자동 설정 후 바로 분석
   useEffect(() => {
     if (!imageUrl || !imgRef.current) return;
     const img = imgRef.current;
 
     const onLoad = () => {
       drawToProcessCanvas(img);
-      if (mode === "auto") {
-        analyze();
+
+      // 처리용 캔버스 크기를 기준으로 가운데 부분에 기본 Crop 박스 생성
+      const c = procRef.current;
+      if (c) {
+        const w = c.width;
+        const h = c.height;
+        const marginX = w * 0.05;
+        const cropW = w * 0.9;
+        const cropH = h * 0.3;
+        const cropY = h * 0.35; // 위/아래 여백을 조금 두고 가운데 띠만 선택
+
+        setCrop({
+          x: marginX,
+          y: cropY,
+          w: cropW,
+          h: cropH,
+        });
+
+        // 새 이미지가 들어오면 기본적으로 Crop 모드로 전환
+        setMode("crop");
       }
+
+      // 기본 Crop 상자 기준으로 자동 분석 한 번 실행
+      analyze();
     };
 
     if (img.complete) {
@@ -1314,7 +1307,7 @@ export default function LfaAnalyzer() {
         img.removeEventListener("load", onLoad);
       };
     }
-  }, [imageUrl, mode, analyze]);
+  }, [imageUrl, analyze]);
 
   const VerdictBadge = useMemo(() => {
     if (!result) return null;
@@ -1344,11 +1337,11 @@ export default function LfaAnalyzer() {
   return (
     <div className="w-full max-w-6xl mx-auto p-4 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-semibold mb-1">
-        📷 LFA QuickCheck v5.4.2
+        📷 LFA QuickCheck v5.5
       </h1>
       <p className="text-sm text-gray-600 mb-4">
-        3라인(ECP - MPO - C) 전용 자동 판독 · Web Worker 기반 프리즈 방지 ·
-        중앙 ROI 자동 선택 + Crop 모드 및 모바일 드래그 지원.
+        3라인(C + M(MPO) + E(ECP)) 자동 판독 · Web Worker 기반 프리즈 방지 ·
+        Crop 모드 및 모바일 드래그 지원.
       </p>
 
       <div
@@ -1370,7 +1363,8 @@ export default function LfaAnalyzer() {
             <div className="text-5xl">⬆️</div>
             <div className="font-medium">사진 업로드 / 드래그</div>
             <div className="text-xs text-gray-500">
-              팁: Crop 모드에서 C/T 창만 박스로 지정하면 더 정확합니다.
+              팁: 업로드 후 자동으로 C/T 창 중심에 Crop 박스가 잡힙니다.
+              필요하면 박스를 드래그해서 조정한 뒤 다시 “분석”을 눌러 주세요.
             </div>
           </div>
         </label>
@@ -1474,6 +1468,8 @@ export default function LfaAnalyzer() {
                 "absolute inset-0 w-full h-full object-contain " +
                 (mode === "crop" ? "cursor-crosshair" : "pointer-events-none")
               }
+              // 모바일에서 스크롤 제스처가 드래그를 가로채지 않도록 설정
+              style={{ touchAction: mode === "crop" ? "none" : "auto" }}
             />
           </div>
           <div className="p-2 text-xs text-gray-500">
@@ -1491,7 +1487,7 @@ export default function LfaAnalyzer() {
         <div className="text-sm text-gray-700">
           {result
             ? `${result.detail} · 신뢰도: ${result.confidence}`
-            : "사진을 올리고 ‘분석’을 누르세요. Web Worker로 멈춤 없이 처리됩니다."}
+            : "사진을 올리면 가운데 C/T 띠에 기본 Crop 박스가 생기고, 자동으로 한 번 분석합니다."}
         </div>
 
         {result && (
@@ -1584,3 +1580,4 @@ export default function LfaAnalyzer() {
     </div>
   );
 }
+
