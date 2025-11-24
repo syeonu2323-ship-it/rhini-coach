@@ -1145,10 +1145,16 @@ export default function LfaAnalyzer() {
     setImageUrl(url);
   };
 
-  const onInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+ const onInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+  try {
     const f = e.target.files?.[0];
-    if (f) onPickFile(f);
-  };
+    if (!f) return;
+    onPickFile(f);
+  } catch (err) {
+    console.error("Image input error:", err);
+  }
+};
+
 
   const stopDrag = (e: React.DragEvent) => e.preventDefault();
 
@@ -1400,14 +1406,25 @@ export default function LfaAnalyzer() {
         onDragOver={stopDrag}
         className="border-2 border-dashed rounded-2xl p-6 mb-4 flex flex-col items-center justify-center text-center hover:bg-gray-50"
       >
-        <label
-  htmlFor="mobileCameraInput"
-  className="w-full cursor-pointer"
-  onClick={() => {
-    const input = document.getElementById("mobileCameraInput") as HTMLInputElement;
-    if (input) input.click();
-  }}
->
+        <label htmlFor="mobileCameraInput" className="w-full cursor-pointer">
+  <input
+    id="mobileCameraInput"
+    type="file"
+    accept="image/*"
+    className="hidden"
+    multiple={false}
+    onChange={(e) => {
+      try {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        onPickFile(f);
+      } catch (err) {
+        console.error("input error:", err);
+      }
+    }}
+  />
+
+
   <input
     id="mobileCameraInput"
     type="file"
