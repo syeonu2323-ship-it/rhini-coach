@@ -561,284 +561,144 @@ function makeWorkerURL() {
   const src = `
 const PRESETS = ${JSON.stringify(PRESETS)};
 
-// ------------------------------------------------------
-// 기본 유틸
-// ------------------------------------------------------
+// -------- 기본 유틸 --------
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
-
-const movingAverage = (a, w) => {
-  const h = Math.floor(w / 2);
-  const out = new Array(a.length).fill(0);
-  for (let i = 0; i < a.length; i++) {
-    let s = 0, c = 0;
-    for (let j = i - h; j <= i + h; j++) {
-      if (j >= 0 && j < a.length) { s += a[j]; c++; }
+const quantile = (arr, q) => {
+  const s = Array.from(arr).sort((a,b)=>a-b);
+  if (!s.length) return 0;
+  return s[Math.floor((s.length - 1) * q)];
+};
+const movingAverage = (arr, w) => {
+  const h = Math.floor(w/2);
+  const out = new Array(arr.length).fill(0);
+  for (let i=0;i<arr.length;i++){
+    let s=0,c=0;
+    for (let j=i-h;j<=i+h;j++){
+      if (j>=0 && j<arr.length){ s+=arr[j]; c++; }
     }
-    out[i] = c ? s / c : 0;
+    out[i] = s / (c||1);
   }
   return out;
 };
 
-const quantile = (arr, q) => {
-  const s = Array.from(arr)
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-  if (!s.length) return 0;
-  return s[Math.floor((s.length - 1) * q)];
-};
-
-// ------------------------------------------------------
-// 이미지를 특정 각도로 돌려서 canvas에 그리기
-// ------------------------------------------------------
-function drawRotated(bitmap, deg) {
-  const rad = (deg * Math.PI) / 180;
-  const sw = bitmap.width;
-  const sh = bitmap.height;
-
-  const base = new OffscreenCanvas(sw, sh);
-  base.getContext("2d").drawImage(bitmap, 0, 0);
-
-  const cos = Math.abs(Math.cos(rad));
-  const sin = Math.abs(Math.sin(rad));
-  const rw = Math.round(sw * cos + sh * sin);
-  const rh = Math.round(sw * sin + sh * cos);
-
-  const rotated = new OffscreenCanvas(rw, rh);
-  const ctx = rotated.getContext("2d");
-  ctx.translate(rw / 2, rh / 2);
-  ctx.rotate(rad);
-  ctx.drawImage(base, -sw / 2, -sh / 2);
-  return rotated;
-}
-
-// ------------------------------------------------------
-// 윈도우 자동 탐지 (Control + Test 라인 전체가 포함된 ROI)
-// ------------------------------------------------------
-function autoDetectWindow(c) {
+// ---------- 세로 라인 전용 ROI 분석 ----------
+function analyzeVertical(c, rect) {
   const ctx = c.getContext("2d");
-  const w = c.width, h = c.height;
-  const img = ctx.getImageData(0, 0, w, h).data;
+  const img = ctx.getImageData(0,0,c.width,c.height).data;
 
-  const bright = new Float32Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    const R = img[i * 4];
-    const G = img[i * 4 + 1];
-    const B = img[i * 4 + 2];
-    bright[i] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
-  }
+  const profY = [];
+  for (let y=rect.y0; y<=rect.y1; y++){
+    let s=0, cnt=0;
+    for (let x=rect.x0; x<=rect.x1; x++){
+      const i = (y * c.width + x) * 4;
+      const R = img[i];
+      const G = img[i+1];
+      const B = img[i+2];
+      const sum = R+G+B || 1;
 
-  const col = new Float32Array(w);
-  const row = new Float32Array(h);
-  for (let x = 0; x < w; x++) {
-    let s = 0;
-    for (let y = 0; y < h; y++) s += bright[y * w + x];
-    col[x] = s / h;
-  }
-  for (let y = 0; y < h; y++) {
-    let s = 0;
-    for (let x = 0; x < w; x++) s += bright[y * w + x];
-    row[y] = s / w;
-  }
-
-  const dcol = movingAverage(
-    Array.from(col).map((v, i) => (i ? Math.abs(v - col[i - 1]) : 0)),
-    Math.max(7, Math.floor(w / 40))
-  );
-
-  const drow = movingAverage(
-    Array.from(row).map((v, i) => (i ? Math.abs(v - row[i - 1]) : 0)),
-    Math.max(7, Math.floor(h / 40))
-  );
-
-  const thx = quantile(dcol, 0.88);
-  const thy = quantile(drow, 0.88);
-
-  const xs = [];
-  const ys = [];
-  for (let i = 1; i < w - 1; i++) if (dcol[i] > thx) xs.push(i);
-  for (let i = 1; i < h - 1; i++) if (drow[i] > thy) ys.push(i);
-
-  const pick = (arr, N) => {
-    if (arr.length < 2) return [Math.round(N * 0.15), Math.round(N * 0.85)];
-    return [arr[0], arr[arr.length - 1]];
-  };
-
-  let [x0, x1] = pick(xs, w);
-  let [y0, y1] = pick(ys, h);
-
-  x0 = clamp(x0 - 5, 0, w - 2);
-  x1 = clamp(x1 + 5, 1, w - 1);
-  y0 = clamp(y0 - 5, 0, h - 2);
-  y1 = clamp(y1 + 5, 1, h - 1);
-
-  return { x0, x1, y0, y1 };
-}
-
-// ------------------------------------------------------
-// ROI 내부 색 프로파일로 peak 찾기
-// ------------------------------------------------------
-function analyzeROI(c, rect) {
-  const ctx = c.getContext("2d");
-  const img = ctx.getImageData(0, 0, c.width, c.height).data;
-  const w = c.width;
-
-  const profX = [];
-  for (let x = rect.x0; x <= rect.x1; x++) {
-    let s = 0, cnt = 0;
-    for (let y = rect.y0; y <= rect.y1; y++) {
-      const i = (y * w + x) * 4;
-      const R = img[i], G = img[i + 1], B = img[i + 2];
-      const sum = R + G + B || 1;
-      const chroma = Math.max(0, R / sum - 0.5 * (G / sum + B / sum));
-      s += chroma; cnt++;
+      // 빨간선 강조
+      const chroma = Math.max(0, R/sum - (G/sum + B/sum)*0.4);
+      s += chroma;
+      cnt++;
     }
-    profX.push(s / cnt);
+    profY.push(s / cnt);
   }
 
-  return { profX };
+  return profY;
 }
 
-// ------------------------------------------------------
-// Peak 추출
-// ------------------------------------------------------
-function getPeaks(arr) {
-  const bg = movingAverage(arr, Math.max(9, Math.floor(arr.length / 12)));
-  const detr = arr.map((v, i) => bg[i] - v);
+// ---------- Peak 탐지 ----------
+function getPeaksVertical(prof) {
+  const bg = movingAverage(prof, Math.max(9, Math.floor(prof.length/14)));
+  const detr = prof.map((v,i)=> bg[i] - v);
 
-  const q25 = quantile(detr, 0.25);
-  const q75 = quantile(detr, 0.75);
-  const sigma = Math.max(1e-6, (q75 - q25) / 1.349);
+  const q25 = quantile(detr,0.25);
+  const q75 = quantile(detr,0.75);
+  const sigma = Math.max(1e-6,(q75-q25)/1.349);
 
-  const z = detr.map((v) => (v - q25) / sigma);
+  const z = detr.map(v=> (v-q25)/sigma);
 
-  const peaks = [];
-  for (let i = 2; i < z.length - 2; i++) {
-    if (z[i] > z[i - 1] && z[i] > z[i + 1] && z[i] > 0.25) {
-      peaks.push({ idx: i, z: z[i] });
-    }
-  }
-  return peaks.sort((a, b) => b.z - a.z);
-}
-
-// ------------------------------------------------------
-// MPO/ECP **정확한 라벨링 로직 (v6.1 핵심 패치)**  
-// ------------------------------------------------------
-// ------------------------------------------------------
-// Control 위치 강제 선택 함수 (v6.2 추가)
-// ------------------------------------------------------
-function pickControl(peaks, controlPos) {
-  if (!peaks || peaks.length === 0) return null;
-
-  if (controlPos === "left") {
-    // 가장 왼쪽 idx가 Control
-    return peaks.reduce((a, b) => (a.idx < b.idx ? a : b));
-  }
-  if (controlPos === "right") {
-    // 가장 오른쪽 idx가 Control
-    return peaks.reduce((a, b) => (a.idx > b.idx ? a : b));
-  }
-  if (controlPos === "top") {
-    // top/bottom은 가로 기준으로 같음 (idx 축이 동일)
-    return peaks.reduce((a, b) => (a.idx < b.idx ? a : b));
-  }
-  if (controlPos === "bottom") {
-    return peaks.reduce((a, b) => (a.idx > b.idx ? a : b));
-  }
-
-  // auto일 때 = 기존처럼 z-score 가장 큰 peak
-  return peaks[0];
-}
-
-function assignMPOECP(peaks, controlIdx) {
-  const byDist = peaks
-    .map((p) => ({ ...p, dist: Math.abs(p.idx - controlIdx) }))
-    .sort((a, b) => a.dist - b.dist);
-
-  const mpo = byDist[0] || null;
-  const ecp = byDist[1] || null;
-
-  return { mpo, ecp };
-}
-
-// ------------------------------------------------------
-// 메인 core 분석
-// ------------------------------------------------------
-function analyzeCore(bitmap, sensitivity, controlPos, crop) {
-
-  let bestCanvas = null;
-  let bestEnergy = -999;
-
-  for (let a = -14; a <= 14; a += 2) {
-    const c = drawRotated(bitmap, a);
-    const ctx = c.getContext("2d");
-    const img = ctx.getImageData(0, 0, c.width, c.height).data;
-
-    let e = 0;
-    for (let i = 0; i < img.length; i += 20) e += img[i];
-    if (e > bestEnergy) {
-      bestEnergy = e;
-      bestCanvas = c;
+  const peaks=[];
+  for (let i=3;i<z.length-3;i++){
+    if (z[i]>z[i-1] && z[i]>z[i+1] && z[i]>0.20){
+      peaks.push({ idx:i, z:z[i] });
     }
   }
 
-  const c = bestCanvas;
-  const rect = crop || autoDetectWindow(c);
-  const prof = analyzeROI(c, rect);
-  const peaks = getPeaks(prof.profX);
+  // 세로 구조: 위→아래 순서 정렬
+  return peaks.sort((a,b)=> a.idx - b.idx);
+}
 
-  if (!peaks.length) return { ok: false, reason: "nopeaks", rect };
+// ---------- Control/MPO/ECP 라벨링 ----------
+function assignCME(peaks) {
+  if (peaks.length === 0) return {};
 
-  const control = pickControl(peaks, controlPos);
+  let C=null, M=null, E=null;
 
-// control이 결정되면 나머지를 test 후보로 분리
-const tests = peaks.filter(p => p.idx !== control.idx);
+  if (peaks.length === 1) {
+    C = peaks[0];
+  } else if (peaks.length === 2) {
+    C = peaks[0];
+    E = peaks[1];
+  } else {
+    C = peaks[0];
+    M = peaks[1];
+    E = peaks[2];
+  }
 
+  return { C, M, E };
+}
 
-  if (!control || control.z < 0.55)
-    return { ok: false, reason: "noControl", rect };
+// -------- 메인 분석 --------
+function analyzeCore(bitmap, sensitivity, crop){
+  const c = new OffscreenCanvas(bitmap.width, bitmap.height);
+  c.getContext("2d").drawImage(bitmap,0,0);
 
-  const { mpo, ecp } = assignMPOECP(tests, control.idx);
+  const rect = crop;
+  const prof = analyzeVertical(c, rect);
+  const peaks = getPeaksVertical(prof);
 
-  const preset = PRESETS[sensitivity];
-  const absMin = preset.TEST_MIN_ABS * 0.7;
-  const relMin = preset.TEST_MIN_REL * 0.7;
+  if (!peaks.length)
+    return { ok:false, reason:"nopeaks", rect };
 
-  const pos = (t) => (t ? t.z >= absMin || t.z >= control.z * relMin : false);
+  const {C, M, E} = assignCME(peaks);
 
-  const mpoPos = pos(mpo);
-  const ecpPos = pos(ecp);
+  if (!C || C.z < 0.25)
+    return { ok:false, reason:"noControl", rect };
 
-  let diagnosis = "none";
-  if (mpoPos && ecpPos) diagnosis = "mixed";
-  else if (mpoPos) diagnosis = "bacterial";
-  else if (ecpPos) diagnosis = "allergic";
+  const pos = (t) => t && t.z >= 0.18;
+
+  const mpoPos = pos(M);
+  const ecpPos = pos(E);
 
   return {
-    ok: true,
-    result: {
+    ok:true,
+    result:{
       verdict: mpoPos || ecpPos ? "Positive" : "Negative",
-      detail: \`C=\${control.z.toFixed(2)}, MPO=\${mpo ? mpo.z.toFixed(2) : 0}, ECP=\${ecp ? ecp.z.toFixed(2) : 0}\`,
-      confidence: control.z > 1.7 ? "확실" : "보통",
-      diagnosis,
-      ecpPositive: !!ecpPos,
-      mpoPositive: !!mpoPos,
-    },
+      detail: \`C=\${C?.z.toFixed(2)}, MPO=\${M?.z.toFixed(2) || 0}, ECP=\${E?.z.toFixed(2) || 0}\`,
+      confidence: C.z>1.0 ? "확실" : "보통",
+      diagnosis:
+        mpoPos && ecpPos ? "mixed" :
+        mpoPos ? "bacterial" :
+        ecpPos ? "allergic" : "none",
+      mpoPositive: mpoPos,
+      ecpPositive: ecpPos
+    }
   };
 }
 
-self.onmessage = async (ev) => {
-  const { bitmap, sensitivity, controlPos, crop } = ev.data;
-
-  try {
-    const out = analyzeCore(bitmap, sensitivity, controlPos, crop);
+self.onmessage = async (ev)=>{
+  const {bitmap, sensitivity, crop} = ev.data;
+  try{
+    const out = analyzeCore(bitmap, sensitivity, crop);
     self.postMessage(out);
-  } catch (e) {
-    self.postMessage({ ok: false, reason: "worker-fail" });
+  } catch(e){
+    self.postMessage({ ok:false, reason:"worker-fail" });
   }
 };
-`;
+  `;
 
-  const blob = new Blob([src], { type: "application/javascript" });
+  const blob = new Blob([src], {type:"application/javascript"});
   return URL.createObjectURL(blob);
 }
 
