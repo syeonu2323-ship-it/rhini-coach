@@ -709,6 +709,19 @@ function findWindowRect(c) {
     if (br[i] > brHi) glareMask[i] = 1;
     if (br[i] < brLo * 0.6) glareMask[i] = 1;
   }
+// === [추가] Crop 내부 glare hard clipping ===
+// 플라스틱 반사/로고 반사 제거
+const localBright = quantile(br, 0.90);
+const hardClip = localBright * 0.95;
+
+for (let y = y0; y <= y1; y++) {
+  for (let x = x0; x <= x1; x++) {
+    const k = y * w + x;
+    if (br[k] > hardClip) {
+      glareMask[k] = 1; // 과노출 픽셀 제거
+    }
+  }
+}
 
   const win = [];
   for (let yy = y0; yy <= y1; yy++) {
@@ -896,24 +909,75 @@ function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
   }
 
   // Control = 가장 강한 peak
-  const control = valid.slice().sort((a, b) => b.z - a.z)[0];
+const control = valid.slice().sort((a, b) => b.z - a.z)[0];
 
-  if (!control || control.z < 0.8) {
-    return { ok: false, reason: "noControl", rect, axis };
+const tests = valid.filter((p) => p !== control);
+
+// peak 색상 계산용: redScore, blueScore 추가
+function getColorScore(p, axisProfile) {
+  // 주변 샘플 5픽셀 평균
+  const win = 3;
+  let rSum = 0, bSum = 0, c = 0;
+
+  for (let i = p.idx - win; i <= p.idx + win; i++) {
+    if (i < 0 || i >= axisProfile.length) continue;
+    rSum += axisProfile[i].red;
+    bSum += axisProfile[i].blue;
+    c++;
   }
 
-  const tests = valid.filter((p) => p !== control);
+  return {
+    redScore: rSum / Math.max(1, c),
+    blueScore: bSum / Math.max(1, c)
+  };
+}
 
-  const testsByDist = tests
-    .map((p) => ({ peak: p, dist: Math.abs(p.idx - control.idx) }))
-    .sort((a, b) => a.dist - b.dist);
+// axisProfile 구성
+const axisProfile = [];
+for (let i = 0; i < sel.z.length; i++) {
+  axisProfile.push({
+    red: profiles.profX ? profiles.profX[i] : profiles.profY[i],
+    blue: profiles.profX ? profiles.profX[i] : profiles.profY[i]
+  });
+}
 
-  let mpo = testsByDist[0] ? testsByDist[0].peak : null;
-  let ecp = testsByDist[1] ? testsByDist[1].peak : null;
+// 왼쪽/오른쪽 peak 구분
+const left = tests
+  .filter((p) => p.idx < control.idx)
+  .sort((a, b) => b.z - a.z)[0];
 
-  const absMin = preset.TEST_MIN_ABS * 0.75;
-  const relMin = preset.TEST_MIN_REL * 0.75;
-  const areaFrac = preset.MIN_AREA_FRAC * 0.9;
+const right = tests
+  .filter((p) => p.idx > control.idx)
+  .sort((a, b) => b.z - a.z)[0];
+
+// MPO/ECP 초기값
+let mpo = null, ecp = null;
+
+// 색 기반 판정
+function isRed(score) {
+  return score.redScore > score.blueScore;
+}
+
+function isBlue(score) {
+  return score.blueScore > score.redScore;
+}
+
+if (left) {
+  const s = getColorScore(left, axisProfile);
+  if (isRed(s)) ecp = left;
+  else mpo = left;
+}
+
+if (right) {
+  const s = getColorScore(right, axisProfile);
+  if (isRed(s)) ecp = right;
+  else mpo = right;
+}
+
+
+  const absMin = preset.TEST_MIN_ABS * 0.55;
+  const relMin = preset.TEST_MIN_REL * 0.65;
+  const areaFrac = preset.MIN_AREA_FRAC * 0.65;
 
   function testPositive(ctrl, t) {
     if (!t) return false;
