@@ -151,34 +151,33 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
   const d = img.data;
 
   // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
-  const detectVertical = (xStart: number, xEnd: number) => {
+ const detectVerticalPeak = (xStart: number, xEnd: number) => {
   let peak = 0;
 
   for (let col = xStart; col < xEnd; col++) {
-    let colSum = 0;
-
+    let sum = 0;
     for (let row = 0; row < h; row++) {
       const i = (row * w + col) * 4;
       const r = d[i], g = d[i + 1], b = d[i + 2];
-
-      // 붉은 라인 강조 (중요)
       const redBoost = r - (g + b) * 0.5;
-      colSum += Math.max(0, redBoost);
+      sum += Math.max(0, redBoost);
     }
-
-    const colAvg = colSum / h;
-
-    // 🔥 Zone 내에서 가장 강한 열(column)을 peak로 저장
-    peak = Math.max(peak, colAvg);
+    const avg = sum / h;
+    peak = Math.max(peak, avg);
   }
 
-  // 🔥 아주 약한 라인도 잡을 수 있는 threshold
-  return peak > 1.6;
+  return peak;  // ✔ 이제 true/false 판단하지 않음
 };
 
-  const Cdet = detectVertical(0, zoneW);
-  const Mdet = detectVertical(zoneW, zoneW * 2);
-  const Edet = detectVertical(zoneW * 2, zoneW * 3);
+
+  const Cpeak = detectVerticalPeak(0, zoneW);
+const Mpeak = detectVerticalPeak(zoneW, zoneW * 2);
+const Epeak = detectVerticalPeak(zoneW * 2, zoneW * 3);
+
+// 🔥 각 칸별로 다른 threshold 적용!
+const Cdet = Cpeak > 2.0;
+const Mdet = Mpeak > 1.5;
+const Edet = Epeak > 1.5;
 
   if (!Cdet) {
     return {
