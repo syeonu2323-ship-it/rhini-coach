@@ -106,49 +106,72 @@ function analyzeCrop(
   const img = ctx.getImageData(x0, y0, w, h);
   const d = img.data;
 
-  // 🎯 3등분
-  const c1 = 0; // C
-  const c2 = Math.floor(w / 3); // M
-  const c3 = Math.floor((w * 2) / 3); // E
+  /* ---------------------------
+     🔥 세로 3등분 (C / MPO / ECP)
+  --------------------------- */
+  const h1 = 0;                 // C zone
+  const h2 = Math.floor(h / 3); // MPO zone
+  const h3 = Math.floor((h * 2) / 3); // ECP zone
 
-  function avgZone(xStart: number, xEnd: number) {
-    let sum = 0;
-    let count = 0;
+  const zoneHeight = Math.floor(h / 3);
 
-    for (let x = xStart; x < xEnd; x++) {
-      for (let y = 0; y < h; y++) {
+  /* ---------------------------
+     🔥 해당 구역에서 가장 어두운 row(peak) 추출
+     (평균값이 아니라 "최소 intensity" 기반)
+  --------------------------- */
+  function zonePeak(yStart: number) {
+    const zoneEnd = yStart + zoneHeight;
+
+    let minRow = Infinity;
+
+    for (let y = yStart; y < zoneEnd; y++) {
+      let rowSum = 0;
+      for (let x = 0; x < w; x++) {
         const i = (y * w + x) * 4;
-        const r = d[i];
-        const g = d[i + 1];
-        const b = d[i + 2];
+        const r = d[i], g = d[i + 1], b = d[i + 2];
 
-        const chroma = r - (g + b) * 0.3;
-        sum += Math.max(0, chroma);
-        count++;
+        // grayscale(단색화)
+        const gray = (r * 0.3 + g * 0.59 + b * 0.11);
+        rowSum += gray;
       }
+      const rowAvg = rowSum / w;
+      if (rowAvg < minRow) minRow = rowAvg;
     }
-    return sum / count;
+
+    return minRow;
   }
 
-  const C = avgZone(c1, c2);
-  const M = avgZone(c2, c3);
-  const E = avgZone(c3, w);
+  const C_peak = zonePeak(h1); // control line 기준
+  const M_peak = zonePeak(h2); // MPO line
+  const E_peak = zonePeak(h3); // ECP line
 
-  // ⚠ C(컨트롤)이 일정 threshold 이하 → 무효
-  if (C < 5) {
+  /* ---------------------------
+     🔥 Control 라인 유무 확인
+     C_peak가 너무 밝으면 (배경과 동일하면) → 무효
+  --------------------------- */
+  const bgLevel = Math.min(M_peak, E_peak); // 주변 배경 추정
+  if (C_peak > bgLevel * 0.95) {
     return {
       verdict: "Invalid",
-      detail: "Control line not detected",
+      detail: `C 미검출 (C=${C_peak.toFixed(1)} / BG=${bgLevel.toFixed(1)})`,
       diagnosis: "none",
       ecpPositive: false,
       mpoPositive: false,
     };
   }
 
-  const mpoPositive = M > 6;
-  const ecpPositive = E > 6;
+  /* ---------------------------
+     🔥 상대 비교로 양성 판단
+     T_peak가 C_peak보다 15~20% 낮으면 → 양성
+     (C 기준으로 T가 확실히 어두워야 함)
+  --------------------------- */
+  const threshold = 0.85; // 85% 이하이면 강한 양성
 
-  let verdict: Verdict = mpoPositive || ecpPositive ? "Positive" : "Negative";
+  const mpoPositive = M_peak < C_peak * threshold;
+  const ecpPositive = E_peak < C_peak * threshold;
+
+  let verdict: Verdict =
+    mpoPositive || ecpPositive ? "Positive" : "Negative";
 
   const diagnosis: Diagnosis =
     mpoPositive && ecpPositive
@@ -161,12 +184,13 @@ function analyzeCrop(
 
   return {
     verdict,
-    detail: `C=${C.toFixed(1)} | M=${M.toFixed(1)} | E=${E.toFixed(1)}`,
+    detail: `C=${C_peak.toFixed(1)} | M=${M_peak.toFixed(1)} | E=${E_peak.toFixed(1)}`,
     diagnosis,
     mpoPositive,
     ecpPositive,
   };
 }
+
 
 /* ============================================================
    📌 증상 분석 + 약 추천
