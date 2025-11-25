@@ -445,16 +445,22 @@ export default function LfaAnalyzer() {
   const bitmap = await createImageBitmap(procRef.current);
 
 
-    const res: AnalyzeResult = await new Promise((resolve) => {
-      const handler = (ev: MessageEvent) => {
-        workerRef.current?.removeEventListener("message", handler);
-        resolve(ev.data);
-      };
+   const res: AnalyzeResult = await new Promise((resolve) => {
+  const w = workerRef.current;
+  if (!w) {
+    resolve({ ok: false, reason: "worker-null" });
+    return;
+  }
 
-workerRef.current.addEventListener("message", handler);
-workerRef.current.postMessage({ bitmap }, [bitmap]);
+  const handler = (ev: MessageEvent) => {
+    w.removeEventListener("message", handler);
+    resolve(ev.data);
+  };
 
-    });
+  w.addEventListener("message", handler);
+  w.postMessage({ bitmap }, [bitmap]);
+});
+
 
     if (res.ok) setResult(res.result);
     else
