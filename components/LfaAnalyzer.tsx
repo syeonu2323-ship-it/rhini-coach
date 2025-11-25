@@ -208,17 +208,71 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
 }
 
 /* ============================================================
+📌 증상 분석
+============================================================ */
+function analyzeSymptoms(text: string) {
+  const t = text.toLowerCase();
+  const hit = (r: RegExp) => r.test(t);
+
+  let otc = new Set<string>();
+  let dept = new Set<string>();
+  let flags = new Set<string>();
+
+  if (hit(/콧물|코막힘|재채기|비염/)) {
+    otc.add("항히스타민제(세티리진, 로라타딘)");
+    dept.add("이비인후과");
+  }
+  if (hit(/열|오한/)) otc.add("해열진통제");
+  if (hit(/목/)) dept.add("호흡기내과");
+  if (hit(/호흡곤란|숨참/)) flags.add("⚠ 즉시 진료 필요");
+
+  return {
+    otc: [...otc],
+    dept: [...dept],
+    flags: [...flags],
+  };
+}
+
+/* ============================================================
+📌 근처 병원/약국 Finder
+============================================================ */
+function NearbyFinder() {
+  const search = (q: string) => {
+    window.open(`https://map.naver.com/v5/search/${encodeURIComponent(q)}`, "_blank");
+    window.open(`https://map.kakao.com/?q=${encodeURIComponent(q)}`, "_blank");
+  };
+
+  return (
+    <div className="mt-5 p-4 border rounded-xl bg-emerald-50 text-sm">
+      <div className="font-semibold mb-2">📍 근처 병원/약국 찾기</div>
+      <button
+        onClick={() => search("약국")}
+        className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg mr-2"
+      >
+        약국
+      </button>
+      <button
+        onClick={() => search("이비인후과")}
+        className="px-3 py-1.5 bg-white border rounded-lg"
+      >
+        이비인후과
+      </button>
+    </div>
+  );
+}
+
+/* ============================================================
 📌 메인 컴포넌트
 ============================================================ */
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [cropBox, setCropBox] = useState<CropRect | null>(null);
   const [result, setResult] = useState<AnalyzeOut | null>(null);
-
   const [symptom, setSymptom] = useState("");
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  /* 이미지 로딩 */
   useEffect(() => {
     if (!imageUrl || !canvasRef.current) return;
 
@@ -237,10 +291,18 @@ export default function LfaAnalyzer() {
     };
   }, [imageUrl]);
 
+  /* 판독하기 */
+  const handleAnalyze = () => {
+    if (canvasRef.current && cropBox) {
+      setResult(analyzeCrop(canvasRef.current, cropBox));
+    }
+  };
+
   return (
     <div className="max-w-4xl mx-auto p-4">
-      <h1 className="text-lg font-semibold mb-4">📸 LFA QuickCheck — 가로 3 Zone + 세로줄 탐지</h1>
+      <h1 className="text-lg font-semibold mb-4">📸 LFA QuickCheck — 3구역 + 세로줄 탐지 버전</h1>
 
+      {/* 이미지 업로드 */}
       <input
         type="file"
         accept="image/*"
@@ -255,24 +317,23 @@ export default function LfaAnalyzer() {
         }}
       />
 
+      {/* 캔버스 + crop + overlay */}
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
         {imageUrl && <CropBox canvasRef={canvasRef} onCrop={setCropBox} />}
         {cropBox && <CropZoneOverlay rect={cropBox} />}
       </div>
 
+      {/* 판독 버튼 */}
       <button
-        onClick={() => {
-          if (canvasRef.current && cropBox) {
-            setResult(analyzeCrop(canvasRef.current, cropBox));
-          }
-        }}
+        onClick={handleAnalyze}
         disabled={!cropBox}
         className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50"
       >
         판독하기
       </button>
 
+      {/* 결과 */}
       {result && (
         <div className="mt-4 p-4 border rounded-xl bg-white">
           <h3 className="font-semibold text-lg mb-2">결과</h3>
@@ -298,87 +359,34 @@ export default function LfaAnalyzer() {
           </p>
         </div>
       )}
+
+      {/* 증상 입력 */}
+      <div className="mt-5 p-4 border rounded-xl bg-rose-50 text-sm">
+        <div className="font-semibold mb-1">📝 증상 기록</div>
+        <textarea
+          className="w-full border rounded-md p-2 text-sm"
+          rows={3}
+          value={symptom}
+          onChange={(e) => setSymptom(e.target.value)}
+          placeholder="예: 콧물, 코막힘, 재채기, 목아픔 등..."
+        />
+        <button
+          className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
+          onClick={() => {
+            const out = analyzeSymptoms(symptom);
+            alert(
+              `💊 약 추천: ${out.otc.join(", ") || "없음"}\n` +
+              `🏥 진료과: ${out.dept.join(", ") || "없음"}\n` +
+              `${out.flags.join(", ")}`
+            );
+          }}
+        >
+          증상 분석
+        </button>
+      </div>
+
+      {/* 근처 병원/약국 Finder */}
+      <NearbyFinder />
     </div>
   );
 }
-/* ============================================================
-📌 증상 분석
-============================================================ */
-function analyzeSymptoms(text: string) {
-  const t = text.toLowerCase();
-  const hit = (r: RegExp) => r.test(t);
-
-  let otc = new Set<string>();
-  let dept = new Set<string>();
-  let flags = new Set<string>();
-
-  if (hit(/콧물|코막힘|재채기|비염/)) {
-    otc.add("항히스타민제(세티리진, 로라타딘 등)");
-    dept.add("이비인후과");
-  }
-  if (hit(/목/)) dept.add("호흡기내과");
-  if (hit(/열|오한/)) otc.add("해열진통제");
-  if (hit(/호흡곤란|숨참/)) flags.add("⚠ 즉시 진료 필요");
-
-  return {
-    otc: [...otc],
-    dept: [...dept],
-    flags: [...flags],
-  };
-}
-/* ============================================================
-📌 근처 병원/약국 찾기
-============================================================ */
-function NearbyFinder() {
-  const openSearch = (q: string) => {
-    window.open(`https://map.naver.com/v5/search/${encodeURIComponent(q)}`, "_blank");
-    window.open(`https://map.kakao.com/?q=${encodeURIComponent(q)}`, "_blank");
-  };
-
-  return (
-    <div className="mt-5 p-4 border rounded-xl bg-emerald-50 text-sm">
-      <div className="font-semibold mb-2">📍 근처 병원/약국 찾기</div>
-
-      <button
-        onClick={() => openSearch("약국")}
-        className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg mr-2"
-      >
-        약국
-      </button>
-
-      <button
-        onClick={() => openSearch("이비인후과")}
-        className="px-3 py-1.5 bg-white border rounded-lg"
-      >
-        이비인후과
-      </button>
-    </div>
-  );
-}
-{/* 증상 입력 */}
-<div className="mt-5 p-4 border rounded-xl bg-rose-50 text-sm">
-  <div className="font-semibold mb-1">📝 증상 기록</div>
-  <textarea
-    className="w-full border rounded-md p-2 text-sm"
-    rows={3}
-    value={symptom}
-    onChange={(e) => setSymptom(e.target.value)}
-    placeholder="예: 콧물, 코막힘, 재채기, 목아픔 등..."
-  />
-  <button
-    className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
-    onClick={() => {
-      const out = analyzeSymptoms(symptom);
-      alert(
-        `💊 약 추천: ${out.otc.join(", ") || "없음"}\n` +
-        `🏥 진료과: ${out.dept.join(", ") || "없음"}\n` +
-        `${out.flags.join(", ")}`
-      );
-    }}
-  >
-    증상 분석
-  </button>
-</div>
-
-{/* 근처 병원/약국 Finder */}
-<NearbyFinder />
