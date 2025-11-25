@@ -1,14 +1,9 @@
 "use client";
 
-import React, {
-  useRef,
-  useState,
-  useEffect,
-  useCallback,
-} from "react";
+import React, { useRef, useState, useEffect } from "react";
 
 /* ============================================================
-   📌 타입
+   📌 타입 정의
 ============================================================ */
 type Verdict = "Positive" | "Negative" | "Invalid";
 type Diagnosis = "none" | "allergic" | "bacterial" | "mixed";
@@ -24,7 +19,7 @@ type AnalyzeOut = {
 type CropRect = { x0: number; y0: number; x1: number; y1: number };
 
 /* ============================================================
-   📌 Crop 박스 (완전 안정화 버전)
+   📌 안정화된 CropBox
 ============================================================ */
 function CropBox({
   canvasRef,
@@ -49,8 +44,8 @@ function CropBox({
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const { scaleX, scaleY } = getScale();
-    setIsDown(true);
 
+    setIsDown(true);
     setBox({
       x0: (e.clientX - rect.left) * scaleX,
       y0: (e.clientY - rect.top) * scaleY,
@@ -101,7 +96,50 @@ function CropBox({
 }
 
 /* ============================================================
-   📌 Hue 기반 zone 판독 (세로로 3칸)
+   📌 Crop 후 표시되는 3-Zone Overlay
+============================================================ */
+function ZoneGuide({
+  rect,
+  canvasRef,
+}: {
+  rect: CropRect;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+}) {
+  if (!canvasRef.current) return null;
+
+  const cvs = canvasRef.current;
+  const display = cvs.getBoundingClientRect();
+
+  const scaleX = display.width / cvs.width;
+  const scaleY = display.height / cvs.height;
+
+  const x = Math.min(rect.x0, rect.x1) * scaleX;
+  const y = Math.min(rect.y0, rect.y1) * scaleY;
+  const w = Math.abs(rect.x1 - rect.x0) * scaleX;
+  const h = Math.abs(rect.y1 - rect.y0) * scaleY;
+
+  const zoneW = w / 3;
+
+  return (
+    <div className="absolute inset-0 pointer-events-none">
+      <div
+        className="absolute border border-blue-400"
+        style={{ left: x, top: y, width: zoneW, height: h }}
+      />
+      <div
+        className="absolute border border-green-400"
+        style={{ left: x + zoneW, top: y, width: zoneW, height: h }}
+      />
+      <div
+        className="absolute border border-orange-400"
+        style={{ left: x + zoneW * 2, top: y, width: zoneW, height: h }}
+      />
+    </div>
+  );
+}
+
+/* ============================================================
+   📌 Hue 기반 판독
 ============================================================ */
 function analyzeCrop(
   canvas: HTMLCanvasElement,
@@ -118,16 +156,16 @@ function analyzeCrop(
 
   const zoneW = Math.floor(w / 3);
 
-  const detectZoneHueRed = (startX: number, endX: number) => {
-    let redCount = 0;
-    let total = 0;
+  const detectHueZone = (sx: number, ex: number) => {
+    let red = 0,
+      tot = 0;
 
-    for (let x = startX; x < endX; x++) {
+    for (let x = sx; x < ex; x++) {
       for (let y = 0; y < h; y++) {
         const i = (y * w + x) * 4;
-        const r = d[i] / 255;
-        const g = d[i + 1] / 255;
-        const b = d[i + 2] / 255;
+        const r = d[i] / 255,
+          g = d[i + 1] / 255,
+          b = d[i + 2] / 255;
 
         const max = Math.max(r, g, b);
         const min = Math.min(r, g, b);
@@ -143,20 +181,20 @@ function analyzeCrop(
         if (H < 0) H += 360;
 
         const isRed = H <= 20 || H >= 340;
-        if (isRed) redCount++;
-        total++;
+        if (isRed) red++;
+        tot++;
       }
     }
 
-    return redCount / total;
+    return red / tot;
   };
 
-  const C = detectZoneHueRed(0, zoneW);
-  const M = detectZoneHueRed(zoneW, zoneW * 2);
-  const E = detectZoneHueRed(zoneW * 2, zoneW * 3);
+  const C = detectHueZone(0, zoneW);
+  const M = detectHueZone(zoneW, zoneW * 2);
+  const E = detectHueZone(zoneW * 2, zoneW * 3);
 
-  const Cdet = C > 0.06;       
-  const Mdet = M > 0.015;      
+  const Cdet = C > 0.06;
+  const Mdet = M > 0.015;
   const Edet = E > 0.015;
 
   if (!Cdet) {
@@ -164,8 +202,8 @@ function analyzeCrop(
       verdict: "Invalid",
       detail: `C=${C.toFixed(4)} / M=${M.toFixed(4)} / E=${E.toFixed(4)}`,
       diagnosis: "none",
-      ecpPositive: false,
       mpoPositive: false,
+      ecpPositive: false,
     };
   }
 
@@ -186,12 +224,12 @@ function analyzeCrop(
 
   return {
     verdict,
-    detail: `Hue % → C=${(C * 100).toFixed(
+    detail: `Hue% → C=${(C * 100).toFixed(
       2
     )}% | MPO=${(M * 100).toFixed(2)}% | ECP=${(E * 100).toFixed(2)}%`,
     diagnosis,
-    ecpPositive,
     mpoPositive,
+    ecpPositive,
   };
 }
 
@@ -202,9 +240,9 @@ function analyzeSymptoms(text: string) {
   const t = text.toLowerCase();
   const hit = (r: RegExp) => r.test(t);
 
-  let otc = new Set<string>();
-  let dept = new Set<string>();
-  let flags = new Set<string>();
+  const otc = new Set<string>();
+  const dept = new Set<string>();
+  const flags = new Set<string>();
 
   if (hit(/콧물|코막힘|비염|재채기/)) {
     otc.add("항히스타민제(세티리진/로라타딘)");
@@ -212,24 +250,23 @@ function analyzeSymptoms(text: string) {
   }
   if (hit(/기침|목아픔/)) dept.add("호흡기내과");
   if (hit(/열|오한/)) otc.add("해열진통제");
-  if (hit(/호흡곤란|청색증/))
-    flags.add("⚠ 응급가능성 — 즉시 병원!");
+  if (hit(/호흡곤란|청색증/)) flags.add("⚠ 즉시 응급진료!");
 
   return { otc: [...otc], dept: [...dept], flags: [...flags] };
 }
 
 /* ============================================================
-   📌 근처 약국/병원 찾기
+   📌 근처 찾기
 ============================================================ */
 function NearbyFinder() {
-  const go = (q: string) => {
+  const go = (q: string) =>
     window.open(
       `https://map.naver.com/v5/search/${encodeURIComponent(q)}`
     );
-  };
+
   return (
     <div className="mt-4 p-3 bg-emerald-50 border rounded-xl text-sm">
-      <div className="font-semibold mb-1">📍 근처 찾기</div>
+      <div className="font-semibold mb-1">📍 근처 병원/약국 찾기</div>
       <button
         onClick={() => go("약국")}
         className="px-3 py-1 bg-emerald-600 text-white rounded-lg mr-2"
@@ -247,28 +284,27 @@ function NearbyFinder() {
 }
 
 /* ============================================================
-   📌 메인
+   📌 메인 컴포넌트
 ============================================================ */
 export default function LfaAnalyzer() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
 
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [cropBox, setCropBox] = useState<CropRect | null>(null);
   const [result, setResult] = useState<AnalyzeOut | null>(null);
   const [symptom, setSymptom] = useState("");
 
+  /* 이미지 로드 */
   useEffect(() => {
     if (!imageUrl || !canvasRef.current) return;
 
     const img = new Image();
     img.src = imageUrl;
     img.onload = () => {
-      imgRef.current = img;
       const cvs = canvasRef.current!;
       const ctx = cvs.getContext("2d")!;
 
-      const maxW = 1400;
+      const maxW = 1300;
       const scale = Math.min(1, maxW / img.width);
 
       cvs.width = img.width * scale;
@@ -286,7 +322,7 @@ export default function LfaAnalyzer() {
   return (
     <div className="max-w-4xl mx-auto p-4">
       <h1 className="text-lg font-semibold mb-4">
-        📸 LFA QuickCheck (세로 3-Line / Crop)
+        📸 LFA QuickCheck — Crop + 3-Zone
       </h1>
 
       <input
@@ -297,16 +333,21 @@ export default function LfaAnalyzer() {
           const f = e.target.files?.[0];
           if (f) {
             setImageUrl(URL.createObjectURL(f));
-            setResult(null);
             setCropBox(null);
+            setResult(null);
           }
         }}
       />
 
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
+
         {imageUrl && (
           <CropBox canvasRef={canvasRef} onCrop={setCropBox} />
+        )}
+
+        {cropBox && (
+          <ZoneGuide rect={cropBox} canvasRef={canvasRef} />
         )}
       </div>
 
@@ -319,7 +360,7 @@ export default function LfaAnalyzer() {
       </button>
 
       {result && (
-        <div className="mt-4 p-4 border rounded-xl">
+        <div className="mt-4 p-4 border rounded-xl bg-white">
           <div className="font-semibold">🎯 판독 결과</div>
           <p className="text-sm mt-1">{result.detail}</p>
 
@@ -333,6 +374,7 @@ export default function LfaAnalyzer() {
             >
               MPO: {result.mpoPositive ? "양성" : "음성"}
             </span>
+
             <span
               className={`px-2 py-1 rounded-md text-sm ${
                 result.ecpPositive
@@ -357,23 +399,26 @@ export default function LfaAnalyzer() {
         </div>
       )}
 
+      {/* 증상 기록 */}
       <div className="mt-4 p-4 bg-rose-50 border rounded-xl text-sm">
         <div className="font-semibold mb-1">📝 증상 기록</div>
+
         <textarea
-          value={symptom}
-          onChange={(e) => setSymptom(e.target.value)}
           rows={3}
           className="w-full border rounded-md p-2 text-sm"
-          placeholder="예: 콧물, 코막힘, 재채기, 목아픔 등"
+          value={symptom}
+          onChange={(e) => setSymptom(e.target.value)}
+          placeholder="예: 콧물, 코막힘, 재채기 등"
         />
+
         <button
           className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
           onClick={() => {
             const out = analyzeSymptoms(symptom);
             alert(
-              `💊 약 추천: ${out.otc.join(", ") || "없음"}\n🏥 진료과: ${
-                out.dept.join(", ") || "없음"
-              }\n${out.flags.join(", ")}`
+              `💊 약 추천: ${out.otc.join(", ") || "없음"}
+🏥 진료과: ${out.dept.join(", ") || "없음"}
+${out.flags.join(", ")}`
             );
           }}
         >
@@ -385,3 +430,4 @@ export default function LfaAnalyzer() {
     </div>
   );
 }
+
