@@ -21,56 +21,48 @@ type CropRect = { x0: number; y0: number; x1: number; y1: number };
 /* ============================================================
 📌 Crop 드래그 박스
 ============================================================ */
-function CropBox({
-  canvasRef,
-  onCrop,
-}: {
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  onCrop: (r: CropRect) => void;
-}) {
-  const [box, setBox] = useState<CropRect | null>(null);
-  const [drag, setDrag] = useState(false);
+function CropBox({ canvasRef, onCrop }) {
+  const [box, setBox] = useState(null);
 
-  const handleDown = (e: React.MouseEvent) => {
+  const handleMouseDown = (e) => {
     if (!canvasRef.current) return;
+
     const rect = canvasRef.current.getBoundingClientRect();
-const scaleX = canvasRef.current.width / rect.width;
-const scaleY = canvasRef.current.height / rect.height;
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
 
-setBox({
-  x0: (e.clientX - rect.left) * scaleX,
-  y0: (e.clientY - rect.top) * scaleY,
-  x1: (e.clientX - rect.left) * scaleX,
-  y1: (e.clientY - rect.top) * scaleY,
-});
-
-  };
-
-  const handleMove = (e: React.MouseEvent) => {
-    if (!canvasRef.current || !drag || !box) return;
-    const rect = canvasRef.current.getBoundingClientRect();
     setBox({
-  ...box,
-  x1: (e.clientX - rect.left) * scaleX,
-  y1: (e.clientY - rect.top) * scaleY,
-});
-
+      x0: (e.clientX - rect.left) * scaleX,
+      y0: (e.clientY - rect.top) * scaleY,
+      x1: (e.clientX - rect.left) * scaleX,
+      y1: (e.clientY - rect.top) * scaleY,
+    });
   };
 
-  useEffect(() => {
-    const endDrag = () => {
-      if (drag && box) onCrop(box);
-      setDrag(false);
-    };
-    window.addEventListener("mouseup", endDrag);
-    return () => window.removeEventListener("mouseup", endDrag);
-  }, [drag, box, onCrop]);
+  const handleMouseMove = (e) => {
+    if (!canvasRef.current || !box) return;
+
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+
+    setBox({
+      ...box,
+      x1: (e.clientX - rect.left) * scaleX,
+      y1: (e.clientY - rect.top) * scaleY,
+    });
+  };
+
+  const handleMouseUp = () => {
+    if (box) onCrop(box);
+  };
 
   return (
     <div
       className="absolute inset-0 cursor-crosshair"
-      onMouseDown={handleDown}
-      onMouseMove={handleMove}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
     >
       {box && (
         <div
@@ -86,6 +78,7 @@ setBox({
     </div>
   );
 }
+
 
 /* ============================================================
 📌 3-zone Overlay (가로 3분할 C / MPO / ECP)
