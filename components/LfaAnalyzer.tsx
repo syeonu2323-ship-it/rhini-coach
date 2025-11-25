@@ -215,6 +215,8 @@ export default function LfaAnalyzer() {
   const [cropBox, setCropBox] = useState<CropRect | null>(null);
   const [result, setResult] = useState<AnalyzeOut | null>(null);
 
+  const [symptom, setSymptom] = useState("");
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
