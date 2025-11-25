@@ -29,10 +29,13 @@ function CropBox({
   onCrop: (r: CropRect) => void;
 }) {
   const [box, setBox] = useState<CropRect | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
+
+    setIsDragging(true);
     setBox({
       x0: e.clientX - rect.left,
       y0: e.clientY - rect.top,
@@ -42,8 +45,9 @@ function CropBox({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!canvasRef.current || !box) return;
+    if (!canvasRef.current || !isDragging || !box) return;
     const rect = canvasRef.current.getBoundingClientRect();
+
     setBox({
       ...box,
       x1: e.clientX - rect.left,
@@ -51,16 +55,24 @@ function CropBox({
     });
   };
 
-  const handleMouseUp = () => {
-    if (box) onCrop(box);
-  };
+  // 🔥 핵심: mouseup 이벤트를 window에 등록
+  useEffect(() => {
+    const handleMouseUp = () => {
+      if (box && isDragging) {
+        onCrop(box);
+      }
+      setIsDragging(false);
+    };
+
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => window.removeEventListener("mouseup", handleMouseUp);
+  }, [box, isDragging, onCrop]);
 
   return (
     <div
       className="absolute inset-0 cursor-crosshair"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
     >
       {box && (
         <div
@@ -76,6 +88,7 @@ function CropBox({
     </div>
   );
 }
+
 
 /* ============================================================
    📌 이미지 intensity 분석 (3등분)
