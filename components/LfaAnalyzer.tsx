@@ -29,9 +29,10 @@ function CropBox({
   canvasRef,
   onCrop,
 }: {
-  canvasRef: React.RefObject<HTMLCanvasElement>;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
   onCrop: (crop: { x: number; y: number; w: number; h: number }) => void;
-}) {
+})
+ {
   const [dragging, setDragging] = useState(false);
   const [box, setBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
@@ -230,7 +231,9 @@ export default function LfaAnalyzer() {
       {/* Canvas 영역 */}
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
-        {imageUrl && <CropBox canvasRef={canvasRef} onCrop={handleCrop} />}
+        {imageUrl && <CropBox canvasRef={canvasRef} onCrop={handleCrop} />
+
+
       </div>
 
       {/* 분석 */}
