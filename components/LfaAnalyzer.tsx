@@ -360,19 +360,53 @@ export default function LfaAnalyzer() {
 
 
 
-      <input
-        type="file"
-        accept="image/*"
-        className="mb-4"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) {
-            setImageUrl(URL.createObjectURL(f));
-            setCropBox(null);
-            setResult(null);
-          }
-        }}
-      />
+     {/* 파일 업로드 (버튼 스타일) */}
+<div className="mb-4">
+  <label
+    htmlFor="fileUpload"
+    className="block w-full px-4 py-2 bg-indigo-600 text-white text-center rounded-lg cursor-pointer hover:bg-indigo-700 transition select-none"
+  >
+    📷 키트 사진 선택하기
+  </label>
+
+  <input
+    id="fileUpload"
+    type="file"
+    accept="image/*"
+    className="hidden"
+    onChange={(e) => {
+      const f = e.target.files?.[0];
+      if (f) {
+        setImageUrl(URL.createObjectURL(f));
+        setCropBox(null);
+        setResult(null);
+      }
+    }}
+  />
+
+  {imageUrl && (
+    <p className="mt-2 text-sm text-gray-600">
+      선택된 파일: <span className="font-medium text-gray-800">{imageUrl.split("/").pop()}</span>
+    </p>
+  )}
+</div>
+{/* 📘 촬영 가이드 */}
+<div className="mb-4 mt-2 p-3 border rounded-lg bg-blue-50 text-sm leading-relaxed">
+  <div className="font-semibold text-blue-800 mb-1">📘 정확한 판독을 위한 촬영 가이드</div>
+
+  <ul className="list-disc ml-5 text-blue-900 space-y-1">
+    <li>키트를 밝은 환경에서 촬영해주세요. (형광등/햇빛 권장)</li>
+    <li>그림자나 손가락이 키트 위를 가리지 않도록 해주세요.</li>
+    <li>카메라를 너무 가까이 대지 말고, 키트 전체가 보이게 촬영해주세요.</li>
+    <li>사진을 업로드한 후에는 C / MPO / ECP 라인이 모두 들어오도록 영역을 드래그해주세요.</li>
+    <li>사진이 세로로 찍혔다면 crop 박스로 영역을 정확히 지정해주세요.</li>
+    <li>희미한 라인도 잡아내기 때문에 흐릿해 보이더라도 그대로 업로드해도 괜찮습니다.</li>
+  </ul>
+
+  <div className="mt-2 text-xs text-blue-800">TIP: 너무 밝거나 어두우면 색이 왜곡될 수 있어요!</div>
+</div>
+
+
 
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
