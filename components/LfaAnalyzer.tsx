@@ -391,7 +391,6 @@ function NearbyFinder() {
     const query = encodeURIComponent(q);
     const naver = `https://map.naver.com/v5/search/${query}`;
     window.open(naver, "_blank");
-    window.open(kakao, "_blank");
   };
 
   return (
