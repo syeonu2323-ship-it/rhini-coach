@@ -316,12 +316,14 @@ self.onmessage = async (ev) => {
           }
         }
 
-        if(count>120){
-          blobs.push({
-            count,
-            centerY:(minY+maxY)/2
-          });
-        }
+        // 더 강한 필터 (약한 잡음 삭제, 실제 라인만 남김)
+if (count > 80 && (maxY - minY) > 4) {
+  blobs.push({
+    count,
+    centerY: (minY + maxY) / 2
+  });
+}
+
       }
     }
 
@@ -430,21 +432,24 @@ export default function LfaAnalyzer() {
   }, [imageUrl]);
 
   // 자동판독 시작
-  const analyze = useCallback(async () => {
-    if (!procRef.current || !workerRef.current) return;
+ const analyze = useCallback(async () => {
+  if (!procRef.current) return;
 
-    setBusy(true);
-    const bitmap = await createImageBitmap(procRef.current);
+  // 🔥 올바른 worker null 처리 위치
+  if (!workerRef.current) {
+    alert("⚠️ 분석 엔진이 초기화되지 않았습니다. 새로고침 후 다시 실행해주세요.");
+    return;
+  }
+
+  setBusy(true);
+  const bitmap = await createImageBitmap(procRef.current);
+
 
     const res: AnalyzeResult = await new Promise((resolve) => {
       const handler = (ev: MessageEvent) => {
         workerRef.current?.removeEventListener("message", handler);
         resolve(ev.data);
       };
-      if (!workerRef.current) {
-  setBusy(false);
-  return;
-}
 
 workerRef.current.addEventListener("message", handler);
 workerRef.current.postMessage({ bitmap }, [bitmap]);
@@ -508,9 +513,21 @@ workerRef.current.postMessage({ bitmap }, [bitmap]);
       </button>
 
       {/* Canvas 미리보기 */}
-      <div className="mt-4">
-        <canvas ref={procRef} className="w-full rounded-xl" />
-      </div>
+<div className="mt-4">
+
+  {/* 반드시 필요!! 이미지 로딩용 */}
+  {imageUrl && (
+    <img
+      ref={imgRef}
+      src={imageUrl}
+      alt="uploaded"
+      className="hidden"
+    />
+  )}
+
+  <canvas ref={procRef} className="w-full rounded-xl" />
+</div>
+
 
       {/* 결과 */}
       <div className="mt-4 p-4 border rounded-xl bg-white">
