@@ -713,7 +713,7 @@ function getPeaks(arr) {
 
   const peaks = [];
   for (let i = 2; i < z.length - 2; i++) {
-    if (z[i] > z[i - 1] && z[i] > z[i + 1] && z[i] > 0.4) {
+    if (z[i] > z[i - 1] && z[i] > z[i + 1] && z[i] > 0.25) {
       peaks.push({ idx: i, z: z[i] });
     }
   }
@@ -723,6 +723,32 @@ function getPeaks(arr) {
 // ------------------------------------------------------
 // MPO/ECP **정확한 라벨링 로직 (v6.1 핵심 패치)**  
 // ------------------------------------------------------
+// ------------------------------------------------------
+// Control 위치 강제 선택 함수 (v6.2 추가)
+// ------------------------------------------------------
+function pickControl(peaks, controlPos) {
+  if (!peaks || peaks.length === 0) return null;
+
+  if (controlPos === "left") {
+    // 가장 왼쪽 idx가 Control
+    return peaks.reduce((a, b) => (a.idx < b.idx ? a : b));
+  }
+  if (controlPos === "right") {
+    // 가장 오른쪽 idx가 Control
+    return peaks.reduce((a, b) => (a.idx > b.idx ? a : b));
+  }
+  if (controlPos === "top") {
+    // top/bottom은 가로 기준으로 같음 (idx 축이 동일)
+    return peaks.reduce((a, b) => (a.idx < b.idx ? a : b));
+  }
+  if (controlPos === "bottom") {
+    return peaks.reduce((a, b) => (a.idx > b.idx ? a : b));
+  }
+
+  // auto일 때 = 기존처럼 z-score 가장 큰 peak
+  return peaks[0];
+}
+
 function assignMPOECP(peaks, controlIdx) {
   const byDist = peaks
     .map((p) => ({ ...p, dist: Math.abs(p.idx - controlIdx) }))
@@ -737,7 +763,8 @@ function assignMPOECP(peaks, controlIdx) {
 // ------------------------------------------------------
 // 메인 core 분석
 // ------------------------------------------------------
-function analyzeCore(bitmap, sensitivity, crop) {
+function analyzeCore(bitmap, sensitivity, controlPos, crop) {
+
   let bestCanvas = null;
   let bestEnergy = -999;
 
@@ -761,10 +788,13 @@ function analyzeCore(bitmap, sensitivity, crop) {
 
   if (!peaks.length) return { ok: false, reason: "nopeaks", rect };
 
-  const control = peaks[0];
-  const tests = peaks.slice(1);
+  const control = pickControl(peaks, controlPos);
 
-  if (!control || control.z < 0.8)
+// control이 결정되면 나머지를 test 후보로 분리
+const tests = peaks.filter(p => p.idx !== control.idx);
+
+
+  if (!control || control.z < 0.55)
     return { ok: false, reason: "noControl", rect };
 
   const { mpo, ecp } = assignMPOECP(tests, control.idx);
@@ -797,9 +827,10 @@ function analyzeCore(bitmap, sensitivity, crop) {
 }
 
 self.onmessage = async (ev) => {
-  const { bitmap, sensitivity, crop } = ev.data;
+  const { bitmap, sensitivity, controlPos, crop } = ev.data;
+
   try {
-    const out = analyzeCore(bitmap, sensitivity, crop);
+    const out = analyzeCore(bitmap, sensitivity, controlPos, crop);
     self.postMessage(out);
   } catch (e) {
     self.postMessage({ ok: false, reason: "worker-fail" });
