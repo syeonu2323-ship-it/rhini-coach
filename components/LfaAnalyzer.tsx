@@ -1,4 +1,4 @@
-"use client";
+ "use client";
 
 import React, { useRef, useState, useEffect } from "react";
 
@@ -96,7 +96,7 @@ function CropBox({
 }
 
 /* ============================================================
-   📌 Crop 후 표시되는 3-Zone Overlay
+   📌 Crop 후 3-Zone 안내선
 ============================================================ */
 function ZoneGuide({
   rect,
@@ -122,30 +122,15 @@ function ZoneGuide({
 
   return (
     <div className="absolute inset-0 pointer-events-none">
-      <div
-        className="absolute border border-blue-400"
-        style={{ left: x, top: y, width: zoneW, height: h }}
-      />
-      <div
-        className="absolute border border-green-400"
-        style={{ left: x + zoneW, top: y, width: zoneW, height: h }}
-      />
-      <div
-        className="absolute border border-orange-400"
-        style={{ left: x + zoneW * 2, top: y, width: zoneW, height: h }}
-      />
+      <div className="absolute border border-blue-400" style={{ left: x, top: y, width: zoneW, height: h }} />
+      <div className="absolute border border-green-400" style={{ left: x + zoneW, top: y, width: zoneW, height: h }} />
+      <div className="absolute border border-orange-400" style={{ left: x + zoneW * 2, top: y, width: zoneW, height: h }} />
     </div>
   );
 }
 
 /* ============================================================
-   📌 Hue 기반 판독
-============================================================ */
-/* ============================================================
-   📌 개선 버전 — 자주색(Magenta/Red) 기반 판독
-============================================================ */
-/* ============================================================
-   📌 Super Sensitive — 자주/빨강/갈자주 모두 감지하는 버전
+   📌 Super Sensitive — 자주/붉자주/갈자주 감지판독
 ============================================================ */
 function analyzeCrop(
   canvas: HTMLCanvasElement,
@@ -162,7 +147,6 @@ function analyzeCrop(
 
   const zoneW = Math.floor(w / 3);
 
-  /* 🔥 극민감 자주+붉자주+갈자주 감지 함수 */
   const detectLineZone = (sx: number, ex: number) => {
     let hit = 0, tot = 0;
 
@@ -185,21 +169,14 @@ function analyzeCrop(
         H *= 60;
         if (H < 0) H += 360;
 
-        /* 🎯 Hue 기준을 대폭 확장
-           - 0°~50° : 빨강~주황(갈색)
-           - 280°~360° : 보라~자주색 
-        */
         const hueHit =
-          (H >= 0 && H <= 50) || 
-          (H >= 280 && H <= 360);
+          (H >= 0 && H <= 50) ||   // 빨강~갈색
+          (H >= 280 && H <= 360);  // 보라~자주
 
-        /* 🎯 Intensity 기준 완화
-           - 붉은빛 또는 자주빛만 있어도 인정
-        */
         const intensityHit =
-          (r > g + 20 && r > b + 10) ||   // 붉은 라인
-          (r > 70 && b > 70) ||           // 자주색
-          (r > 90 && g > 60 && b > 40);   // 갈색 섞인 자주
+          (r > g + 20 && r > b + 10) || 
+          (r > 70 && b > 70) ||
+          (r > 90 && g > 60 && b > 40);
 
         if (hueHit && intensityHit) hit++;
         tot++;
@@ -212,8 +189,7 @@ function analyzeCrop(
   const M = detectLineZone(zoneW, zoneW * 2);
   const E = detectLineZone(zoneW * 2, zoneW * 3);
 
-  /* 🎯 임계값을 아주 낮게 설정 (극민감) */
-  const Cdet = C > 0.003; 
+  const Cdet = C > 0.003;
   const Mdet = M > 0.0025;
   const Edet = E > 0.0025;
 
@@ -244,6 +220,48 @@ function analyzeCrop(
     mpoPositive: mpo,
     ecpPositive: ecp,
   };
+}
+
+/* ============================================================
+   📌 증상 분석
+============================================================ */
+function analyzeSymptoms(text: string) {
+  const t = text.toLowerCase();
+  const hit = (r: RegExp) => r.test(t);
+
+  const otc = new Set<string>();
+  const dept = new Set<string>();
+  const flags = new Set<string>();
+
+  if (hit(/콧물|코막힘|비염|재채기/)) {
+    otc.add("항히스타민제(세티리진/로라타딘)");
+    dept.add("이비인후과");
+  }
+  if (hit(/기침|목아픔/)) dept.add("호흡기내과");
+  if (hit(/열|오한/)) otc.add("해열진통제");
+  if (hit(/호흡곤란|청색증/)) flags.add("⚠ 즉시 응급진료!");
+
+  return { otc: [...otc], dept: [...dept], flags: [...flags] };
+}
+
+/* ============================================================
+   📌 근처 찾기
+============================================================ */
+function NearbyFinder() {
+  const go = (q: string) =>
+    window.open(`https://map.naver.com/v5/search/${encodeURIComponent(q)}`);
+
+  return (
+    <div className="mt-4 p-3 bg-emerald-50 border rounded-xl text-sm">
+      <div className="font-semibold mb-1">📍 근처 병원/약국 찾기</div>
+      <button onClick={() => go("약국")} className="px-3 py-1 bg-emerald-600 text-white rounded-lg mr-2">
+        약국
+      </button>
+      <button onClick={() => go("이비인후과")} className="px-3 py-1 bg-white border rounded-lg">
+        이비인후과
+      </button>
+    </div>
+  );
 }
 
 /* ============================================================
@@ -284,9 +302,7 @@ export default function LfaAnalyzer() {
 
   return (
     <div className="max-w-4xl mx-auto p-4">
-      <h1 className="text-lg font-semibold mb-4">
-        📸 LFA QuickCheck — Crop + 3-Zone
-      </h1>
+      <h1 className="text-lg font-semibold mb-4">📸 LFA QuickCheck — Crop + 3-Zone</h1>
 
       <input
         type="file"
@@ -305,13 +321,9 @@ export default function LfaAnalyzer() {
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
 
-        {imageUrl && (
-          <CropBox canvasRef={canvasRef} onCrop={setCropBox} />
-        )}
+        {imageUrl && <CropBox canvasRef={canvasRef} onCrop={setCropBox} />}
 
-        {cropBox && (
-          <ZoneGuide rect={cropBox} canvasRef={canvasRef} />
-        )}
+        {cropBox && <ZoneGuide rect={cropBox} canvasRef={canvasRef} />}
       </div>
 
       <button
@@ -330,9 +342,7 @@ export default function LfaAnalyzer() {
           <div className="flex gap-2 mt-3">
             <span
               className={`px-2 py-1 rounded-md text-sm ${
-                result.mpoPositive
-                  ? "bg-sky-100 text-sky-700"
-                  : "bg-gray-200 text-gray-700"
+                result.mpoPositive ? "bg-sky-100 text-sky-700" : "bg-gray-200 text-gray-700"
               }`}
             >
               MPO: {result.mpoPositive ? "양성" : "음성"}
@@ -340,9 +350,7 @@ export default function LfaAnalyzer() {
 
             <span
               className={`px-2 py-1 rounded-md text-sm ${
-                result.ecpPositive
-                  ? "bg-amber-100 text-amber-700"
-                  : "bg-gray-200 text-gray-700"
+                result.ecpPositive ? "bg-amber-100 text-amber-700" : "bg-gray-200 text-gray-700"
               }`}
             >
               ECP: {result.ecpPositive ? "양성" : "음성"}
@@ -393,4 +401,3 @@ ${out.flags.join(", ")}`
     </div>
   );
 }
-
