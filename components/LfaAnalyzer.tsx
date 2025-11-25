@@ -262,88 +262,103 @@ self.onmessage = async (ev) => {
     const img = ctx.getImageData(0, 0, width, height);
     const data = img.data;
 
-    // 1️⃣ 가로 방향 프로필 생성 (x축으로 peak 찾기)
-    const prof = new Array(width).fill(0);
+    const mask = new Uint8Array(width * height);
 
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      let count = 0;
+    // 1) RGB→HSV + 붉은 마스크
+    for (let i = 0; i < width * height; i++) {
+      const r = data[i*4]/255;
+      const g = data[i*4+1]/255;
+      const b = data[i*4+2]/255;
 
-      for (let y = 0; y < height; y++) {
-        const i = (y * width + x) * 4;
-        const r = data[i] / 255;
-        const g = data[i + 1] / 255;
-        const b = data[i + 2] / 255;
+      const mx = Math.max(r,g,b);
+      const mn = Math.min(r,g,b);
+      const d = mx - mn;
 
-        const maxv = Math.max(r, g, b);
-        const minv = Math.min(r, g, b);
-        const diff = maxv - minv;
+      let h = 0;
+      if (d !== 0) {
+        if (mx === r) h = ((g-b)/d) % 6;
+        else if (mx === g) h = (b-r)/d + 2;
+        else h = (r-g)/d + 4;
+      }
+      h = (h*60+360) % 360;
 
-        let h = 0;
-        if (diff !== 0) {
-          if (maxv === r) h = ((g - b) / diff) % 6;
-          else if (maxv === g) h = (b - r) / diff + 2;
-          else h = (r - g) / diff + 4;
-        }
-        h = (h * 60 + 360) % 360;
+      const s = mx === 0 ? 0 : d/mx;
+      const v = mx;
 
-        const s = maxv === 0 ? 0 : diff / maxv;
-        const v = maxv;
+      if ((h < 25 || h > 330) && s > 0.35 && v > 0.25) mask[i] = 1;
+    }
 
-        // 빨간색 선만 잡음
-        if ((h < 25 || h > 330) && s > 0.35 && v > 0.25) {
-          sum += v;
+    // 2) Blob 자동 탐지
+    const visited = new Uint8Array(width * height);
+    const blobs = [];
+
+    for (let i = 0; i < width * height; i++) {
+      if (mask[i] && !visited[i]) {
+        const q = [i];
+        visited[i] =1;
+
+        let count=0;
+        let minY=height, maxY=0;
+
+        while(q.length){
+          const p = q.pop();
           count++;
+          const y = (p/width)|0;
+          minY = Math.min(minY,y);
+          maxY = Math.max(maxY,y);
+
+          const nb=[p-1,p+1,p-width,p+width];
+          for(const n of nb){
+            if(n>=0 && n < width*height && mask[n] && !visited[n]){
+              visited[n]=1;
+              q.push(n);
+            }
+          }
         }
+
+        // 더 강한 필터 (약한 잡음 삭제, 실제 라인만 남김)
+if (count > 80 && (maxY - minY) > 4) {
+  blobs.push({
+    count,
+    centerY: (minY + maxY) / 2
+  });
+}
+
       }
-      prof[x] = count ? sum / count : 0;
     }
 
-    // 2️⃣ peak 3개 찾기
-    const peaks = [];
-    for (let x = 2; x < width - 2; x++) {
-      const v = prof[x];
-      if (v > prof[x - 1] && v > prof[x + 1] && v > 0.05) {
-        peaks.push({ x, v });
-      }
+    if(blobs.length===0){
+      self.postMessage({ok:false, reason:"no-lines"});
+      return;
     }
 
-    if (peaks.length < 1)
-      return self.postMessage({ ok: false, reason: "no-lines" });
+    blobs.sort((a,b)=>a.centerY-b.centerY);
 
-    peaks.sort((a, b) => a.x - b.x);
-
-    // 3️⃣ 가장 강한 3개 peak만 선택
-    const strong = peaks
-      .sort((a, b) => b.v - a.v)
-      .slice(0, 3)
-      .sort((a, b) => a.x - b.x);
-
-    const C = strong[0] || null;
-    const M = strong[1] || null;
-    const E = strong[2] || null;
+    const C = blobs[0];
+    const M = blobs[1] || null;
+    const E = blobs[2] || null;
 
     const mpo = !!M;
     const ecp = !!E;
 
     self.postMessage({
-      ok: true,
-      result: {
-        verdict: mpo || ecp ? "Positive" : "Negative",
-        detail: \`C=\${!!C} | MPO=\${mpo} | ECP=\${ecp}\`,
-        confidence: "확실",
+      ok:true,
+      result:{
+        verdict: mpo || ecp ? "Positive":"Negative",
+        detail: \`C=OK | MPO=\${mpo} | ECP=\${ecp}\`,
+        confidence:"확실",
         diagnosis:
           mpo && ecp ? "mixed" :
           mpo ? "bacterial" :
           ecp ? "allergic" :
           "none",
-        mpoPositive: mpo,
-        ecpPositive: ecp
+        mpoPositive:mpo,
+        ecpPositive:ecp
       }
     });
 
-  } catch (e) {
-    self.postMessage({ ok: false, reason: "worker-error" });
+  } catch(e){
+    self.postMessage({ok:false, reason:"worker-error"});
   }
 };
 `;
@@ -358,7 +373,7 @@ self.onmessage = async (ev) => {
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{
+ const [result, setResult] = useState<{
   verdict: Verdict;
   detail: string;
   confidence: "확실" | "보통" | "약함";
@@ -417,7 +432,7 @@ export default function LfaAnalyzer() {
   }, [imageUrl]);
 
   // 자동판독 시작
- const analyze = useCallback(async () => {
+  const analyze = useCallback(async () => {
   if (!procRef.current) return;
 
   // 🔥 올바른 worker null 처리 위치
@@ -430,7 +445,7 @@ export default function LfaAnalyzer() {
   const bitmap = await createImageBitmap(procRef.current);
 
 
-   const res: AnalyzeResult = await new Promise((resolve) => {
+    const res: AnalyzeResult = await new Promise((resolve) => {
   const w = workerRef.current;
   if (!w) {
     resolve({ ok: false, reason: "worker-null" });
