@@ -231,7 +231,9 @@ export default function LfaAnalyzer() {
       {/* Canvas 영역 */}
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
-        {imageUrl && <CropBox canvasRef={canvasRef} onCrop={handleCrop} />
+       {imageUrl && (
+  <CropBox canvasRef={canvasRef} onCrop={handleCrop} />
+)}
 
 
       </div>
