@@ -152,30 +152,31 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
 
   // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
   const detectVertical = (xStart: number, xEnd: number) => {
-  let minCol = Infinity;
-  let maxCol = -Infinity;
+  let lineStrength = 0;
+  const zoneWidth = xEnd - xStart;
 
   for (let col = xStart; col < xEnd; col++) {
-    let colSum = 0;
+    let rSum = 0, gSum = 0, bSum = 0;
+
     for (let row = 0; row < h; row++) {
       const i = (row * w + col) * 4;
       const r = d[i], g = d[i + 1], b = d[i + 2];
-      const gray = r * 0.3 + g * 0.59 + b * 0.11;
-      colSum += gray;
+
+      // 🔥 "줄"만 강하게 검출하는 적색 강화값
+      const redBoost = r - (g + b) * 0.5;
+      rSum += Math.max(0, redBoost);
     }
-    const avg = colSum / h;
-    minCol = Math.min(minCol, avg);
-    maxCol = Math.max(maxCol, avg);
+
+    const colAvg = rSum / h;
+    lineStrength += colAvg;
   }
 
-  const diff = maxCol - minCol;
+  // 전체 zone 평균
+  const zoneAvg = lineStrength / zoneWidth;
 
-  // 🔥 자동 문턱값 — 전체 밝기 대비로 계산
-  const dynamicThreshold = Math.max(6, (maxCol + minCol) * 0.05);
-
-  return diff > dynamicThreshold;
+  // 🔥 자동 threshold (약한 선도 긁어옴)
+  return zoneAvg > 4.5;
 };
-
 
   const Cdet = detectVertical(0, zoneW);
   const Mdet = detectVertical(zoneW, zoneW * 2);
