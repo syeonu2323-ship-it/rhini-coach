@@ -21,6 +21,9 @@ type CropRect = { x0: number; y0: number; x1: number; y1: number };
 /* ============================================================
    📌 안정화된 CropBox
 ============================================================ */
+/* ============================================================
+   📌 안정화된 CropBox — Mouse + Touch 지원 버전
+============================================================ */
 function CropBox({
   canvasRef,
   onCrop,
@@ -40,30 +43,33 @@ function CropBox({
     };
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!canvasRef.current) return;
+  /* -----------------------------
+        공통 좌표 계산 함수
+  ----------------------------- */
+  const getPos = (clientX: number, clientY: number) => {
+    if (!canvasRef.current) return { x: 0, y: 0 };
     const rect = canvasRef.current.getBoundingClientRect();
     const { scaleX, scaleY } = getScale();
 
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
+    };
+  };
+
+  /* -----------------------------
+        Mouse 이벤트
+  ----------------------------- */
+  const handleMouseDown = (e: React.MouseEvent) => {
+    const { x, y } = getPos(e.clientX, e.clientY);
     setIsDown(true);
-    setBox({
-      x0: (e.clientX - rect.left) * scaleX,
-      y0: (e.clientY - rect.top) * scaleY,
-      x1: (e.clientX - rect.left) * scaleX,
-      y1: (e.clientY - rect.top) * scaleY,
-    });
+    setBox({ x0: x, y0: y, x1: x, y1: y });
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!canvasRef.current || !isDown || !box) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const { scaleX, scaleY } = getScale();
-
-    setBox({
-      ...box,
-      x1: (e.clientX - rect.left) * scaleX,
-      y1: (e.clientY - rect.top) * scaleY,
-    });
+    if (!isDown || !box) return;
+    const { x, y } = getPos(e.clientX, e.clientY);
+    setBox({ ...box, x1: x, y1: y });
   };
 
   const handleMouseUp = () => {
@@ -71,14 +77,42 @@ function CropBox({
     setIsDown(false);
   };
 
+  /* -----------------------------
+        Touch 이벤트 (모바일)
+  ----------------------------- */
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    const { x, y } = getPos(t.clientX, t.clientY);
+    setIsDown(true);
+    setBox({ x0: x, y0: y, x1: x, y1: y });
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isDown || !box) return;
+    const t = e.touches[0];
+    const { x, y } = getPos(t.clientX, t.clientY);
+    setBox({ ...box, x1: x, y1: y });
+  };
+
+  const handleTouchEnd = () => {
+    if (isDown && box) onCrop(box);
+    setIsDown(false);
+  };
+
+  /* -----------------------------
+        렌더
+  ----------------------------- */
   const { scaleX, scaleY } = getScale();
 
   return (
     <div
-      className="absolute inset-0 cursor-crosshair"
+      className="absolute inset-0 cursor-crosshair touch-none"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
     >
       {box && (
         <div
@@ -94,6 +128,7 @@ function CropBox({
     </div>
   );
 }
+
 
 /* ============================================================
    📌 Crop 후 3-Zone 안내선
