@@ -34,23 +34,27 @@ function CropBox({
   const handleDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    setDrag(true);
-    setBox({
-      x0: e.clientX - rect.left,
-      y0: e.clientY - rect.top,
-      x1: e.clientX - rect.left,
-      y1: e.clientY - rect.top,
-    });
+const scaleX = canvasRef.current.width / rect.width;
+const scaleY = canvasRef.current.height / rect.height;
+
+setBox({
+  x0: (e.clientX - rect.left) * scaleX,
+  y0: (e.clientY - rect.top) * scaleY,
+  x1: (e.clientX - rect.left) * scaleX,
+  y1: (e.clientY - rect.top) * scaleY,
+});
+
   };
 
   const handleMove = (e: React.MouseEvent) => {
     if (!canvasRef.current || !drag || !box) return;
     const rect = canvasRef.current.getBoundingClientRect();
     setBox({
-      ...box,
-      x1: e.clientX - rect.left,
-      y1: e.clientY - rect.top,
-    });
+  ...box,
+  x1: (e.clientX - rect.left) * scaleX,
+  y1: (e.clientY - rect.top) * scaleY,
+});
+
   };
 
   useEffect(() => {
