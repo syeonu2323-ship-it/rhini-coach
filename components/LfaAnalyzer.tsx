@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useRef, useState, useEffect, useCallback } from "react";
+import React, { useRef, useState, useEffect } from "react";
 
 /* ============================================================
-   📌 타입 정의
+📌 타입 정의
 ============================================================ */
 type Verdict = "Positive" | "Negative" | "Invalid";
 type Diagnosis = "none" | "allergic" | "bacterial" | "mixed";
@@ -19,7 +19,7 @@ type AnalyzeOut = {
 type CropRect = { x0: number; y0: number; x1: number; y1: number };
 
 /* ============================================================
-   📌 Crop 드래그 박스
+📌 Crop 드래그 박스
 ============================================================ */
 function CropBox({
   canvasRef,
@@ -34,7 +34,6 @@ function CropBox({
   const handleDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-
     setDrag(true);
     setBox({
       x0: e.clientX - rect.left,
@@ -47,7 +46,6 @@ function CropBox({
   const handleMove = (e: React.MouseEvent) => {
     if (!canvasRef.current || !drag || !box) return;
     const rect = canvasRef.current.getBoundingClientRect();
-
     setBox({
       ...box,
       x1: e.clientX - rect.left,
@@ -86,7 +84,7 @@ function CropBox({
 }
 
 /* ============================================================
-   📌 3-zone Overlay 표시 (C / MPO / ECP)
+📌 3-zone Overlay (가로 3분할 C / MPO / ECP)
 ============================================================ */
 function CropZoneOverlay({ rect }: { rect: CropRect | null }) {
   if (!rect) return null;
@@ -95,7 +93,8 @@ function CropZoneOverlay({ rect }: { rect: CropRect | null }) {
   const y = Math.min(rect.y0, rect.y1);
   const w = Math.abs(rect.x1 - rect.x0);
   const h = Math.abs(rect.y1 - rect.y0);
-  const zoneH = h / 3;
+
+  const zoneW = w / 3; // 가로 방향 3등분
 
   return (
     <div className="absolute inset-0 pointer-events-none">
@@ -105,32 +104,30 @@ function CropZoneOverlay({ rect }: { rect: CropRect | null }) {
         style={{
           left: x,
           top: y,
-          width: w,
-          height: zoneH,
+          width: zoneW,
+          height: h,
           background: "rgba(0,255,0,0.1)",
         }}
       />
-
       {/* MPO */}
       <div
         className="absolute border border-blue-400"
         style={{
-          left: x,
-          top: y + zoneH,
-          width: w,
-          height: zoneH,
+          left: x + zoneW,
+          top: y,
+          width: zoneW,
+          height: h,
           background: "rgba(0,0,255,0.1)",
         }}
       />
-
       {/* ECP */}
       <div
         className="absolute border border-yellow-400"
         style={{
-          left: x,
-          top: y + zoneH * 2,
-          width: w,
-          height: zoneH,
+          left: x + zoneW * 2,
+          top: y,
+          width: zoneW,
+          height: h,
           background: "rgba(255,255,0,0.1)",
         }}
       />
@@ -139,52 +136,50 @@ function CropZoneOverlay({ rect }: { rect: CropRect | null }) {
 }
 
 /* ============================================================
-   📌 강력한 3-존 Contrast 기반 LFA 탐지
+📌 가로 3-zone + 세로줄 탐지 알고리즘
 ============================================================ */
 function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
   const ctx = canvas.getContext("2d")!;
-
   const x = Math.min(rect.x0, rect.x1);
   const y = Math.min(rect.y0, rect.y1);
   const w = Math.abs(rect.x1 - rect.x0);
   const h = Math.abs(rect.y1 - rect.y0);
 
-  const zoneH = Math.floor(h / 3); // 세로로 3개 나눔
+  const zoneW = Math.floor(w / 3); // 가로 3등분
 
   const img = ctx.getImageData(x, y, w, h);
   const d = img.data;
 
-  // 🔥 세로줄(Vertical Line) 탐지 알고리즘 
-  const detectVerticalLine = (yStart: number, yEnd: number) => {
+  // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
+  const detectVertical = (xStart: number, xEnd: number) => {
     let minCol = Infinity;
     let maxCol = -Infinity;
 
-    for (let col = 0; col < w; col++) {
+    for (let col = xStart; col < xEnd; col++) {
       let colSum = 0;
-      for (let row = yStart; row < yEnd; row++) {
+      for (let row = 0; row < h; row++) {
         const i = (row * w + col) * 4;
         const r = d[i], g = d[i + 1], b = d[i + 2];
         const gray = r * 0.3 + g * 0.59 + b * 0.11;
         colSum += gray;
       }
-      const colAvg = colSum / (yEnd - yStart);
-
-      minCol = Math.min(minCol, colAvg);
-      maxCol = Math.max(maxCol, colAvg);
+      const avg = colSum / h;
+      minCol = Math.min(minCol, avg);
+      maxCol = Math.max(maxCol, avg);
     }
 
-    // vertical contrast가 크면 선이 있음
-    return maxCol - minCol > 18;
+    // 세로줄 대비 threshold
+    return maxCol - minCol > 14;
   };
 
-  const Cdet = detectVerticalLine(0, zoneH);
-  const Mdet = detectVerticalLine(zoneH, zoneH * 2);
-  const Edet = detectVerticalLine(zoneH * 2, zoneH * 3);
+  const Cdet = detectVertical(0, zoneW);
+  const Mdet = detectVertical(zoneW, zoneW * 2);
+  const Edet = detectVertical(zoneW * 2, zoneW * 3);
 
   if (!Cdet) {
     return {
       verdict: "Invalid",
-      detail: "C line missing",
+      detail: "Control line missing",
       diagnosis: "none",
       ecpPositive: false,
       mpoPositive: false,
@@ -205,79 +200,23 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
 
   return {
     verdict: mpoPositive || ecpPositive ? "Positive" : "Negative",
-    detail: `C=${Cdet} / M=${Mdet} / E=${Edet}`,
+    detail: `C=${Cdet} M=${Mdet} E=${Edet}`,
     diagnosis,
     mpoPositive,
     ecpPositive,
   };
 }
 
-
 /* ============================================================
-   📌 증상 분석
-============================================================ */
-function analyzeSymptoms(text: string) {
-  const t = text.toLowerCase();
-  const hit = (r: RegExp) => r.test(t);
-
-  let otc = new Set<string>();
-  let dept = new Set<string>();
-  let flags = new Set<string>();
-
-  if (hit(/콧물|재채기|코막힘|비염/)) {
-    otc.add("항히스타민(세티리진/로라타딘)");
-    dept.add("이비인후과");
-  }
-  if (hit(/열|오한/)) otc.add("해열진통제");
-  if (hit(/호흡곤란/)) flags.add("⚠ 즉시 진료 필요");
-
-  return {
-    otc: [...otc],
-    dept: [...dept],
-    flags: [...flags],
-  };
-}
-
-/* ============================================================
-   📌 근처 찾기
-============================================================ */
-function NearbyFinder() {
-  const search = (q: string) => {
-    window.open(`https://map.naver.com/v5/search/${encodeURIComponent(q)}`);
-    window.open(`https://map.kakao.com/?q=${encodeURIComponent(q)}`);
-  };
-
-  return (
-    <div className="mt-4 p-4 border rounded-xl bg-emerald-50 text-sm">
-      <div className="font-semibold mb-2">📍 근처 병원/약국 찾기</div>
-      <button
-        onClick={() => search("약국")}
-        className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg mr-2"
-      >
-        약국
-      </button>
-      <button
-        onClick={() => search("이비인후과")}
-        className="px-3 py-1.5 bg-white border rounded-lg"
-      >
-        이비인후과
-      </button>
-    </div>
-  );
-}
-
-/* ============================================================
-   📌 메인 컴포넌트
+📌 메인 컴포넌트
 ============================================================ */
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [cropBox, setCropBox] = useState<CropRect | null>(null);
   const [result, setResult] = useState<AnalyzeOut | null>(null);
-  const [symptom, setSymptom] = useState("");
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  /* 이미지 로딩 */
   useEffect(() => {
     if (!imageUrl || !canvasRef.current) return;
 
@@ -291,21 +230,15 @@ export default function LfaAnalyzer() {
 
       cvs.width = img.width * scale;
       cvs.height = img.height * scale;
+
       ctx.drawImage(img, 0, 0, cvs.width, cvs.height);
     };
   }, [imageUrl]);
 
-  const handleAnalyze = () => {
-    if (!canvasRef.current || !cropBox) return;
-    const out = analyzeCrop(canvasRef.current, cropBox);
-    setResult(out);
-  };
-
   return (
     <div className="max-w-4xl mx-auto p-4">
-      <h1 className="text-xl font-semibold mb-4">📸 LFA QuickCheck — Crop 3-Zone Version</h1>
+      <h1 className="text-lg font-semibold mb-4">📸 LFA QuickCheck — 가로 3 Zone + 세로줄 탐지</h1>
 
-      {/* 이미지 업로드 */}
       <input
         type="file"
         accept="image/*"
@@ -320,84 +253,130 @@ export default function LfaAnalyzer() {
         }}
       />
 
-      {/* Canvas + Crop + 3-zone Overlay */}
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
         {imageUrl && <CropBox canvasRef={canvasRef} onCrop={setCropBox} />}
         {cropBox && <CropZoneOverlay rect={cropBox} />}
       </div>
 
-      {/* 판독 */}
       <button
-        onClick={handleAnalyze}
+        onClick={() => {
+          if (canvasRef.current && cropBox) {
+            setResult(analyzeCrop(canvasRef.current, cropBox));
+          }
+        }}
         disabled={!cropBox}
         className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg disabled:opacity-50"
       >
         판독하기
       </button>
 
-      {/* 결과 영역 */}
       {result && (
         <div className="mt-4 p-4 border rounded-xl bg-white">
           <h3 className="font-semibold text-lg mb-2">결과</h3>
-          <p className="text-sm mb-2">{result.detail}</p>
+          <p className="text-sm">{result.detail}</p>
 
-          <div className="flex gap-2">
-            <span
-              className={`px-2 py-1 rounded-lg text-sm ${
-                result.mpoPositive ? "bg-sky-100 text-sky-700" : "bg-gray-200 text-gray-700"
-              }`}
-            >
+          <div className="flex gap-2 mt-2">
+            <span className={`px-2 py-1 rounded-lg text-sm ${result.mpoPositive ? "bg-blue-100 text-blue-700" : "bg-gray-200"}`}>
               MPO: {result.mpoPositive ? "양성" : "음성"}
             </span>
-            <span
-              className={`px-2 py-1 rounded-lg text-sm ${
-                result.ecpPositive ? "bg-amber-100 text-amber-700" : "bg-gray-200 text-gray-700"
-              }`}
-            >
+            <span className={`px-2 py-1 rounded-lg text-sm ${result.ecpPositive ? "bg-yellow-100 text-yellow-700" : "bg-gray-200"}`}>
               ECP: {result.ecpPositive ? "양성" : "음성"}
             </span>
           </div>
 
           <p className="mt-3 text-sm">
-            🧩 진단:{" "}
-            {result.diagnosis === "allergic"
-              ? "🌼 알레르기성 비염"
-              : result.diagnosis === "bacterial"
+            🧩 {result.diagnosis === "bacterial"
               ? "🦠 세균성 비염"
+              : result.diagnosis === "allergic"
+              ? "🌼 알레르기성 비염"
               : result.diagnosis === "mixed"
-              ? "🌼🦠 혼합형"
-              : "해당 없음"}
+              ? "🦠🌼 혼합형"
+              : "음성"}
           </p>
         </div>
       )}
-
-      {/* 증상 입력 */}
-      <div className="mt-4 p-4 border rounded-xl bg-rose-50 text-sm">
-        <div className="font-semibold mb-1">📝 증상 기록</div>
-        <textarea
-          className="w-full border rounded-md p-2 text-sm"
-          rows={3}
-          value={symptom}
-          onChange={(e) => setSymptom(e.target.value)}
-          placeholder="예: 콧물, 재채기, 목아픔…"
-        />
-        <button
-          className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
-          onClick={() => {
-            const out = analyzeSymptoms(symptom);
-            alert(
-              `💊 약 추천: ${out.otc.join(", ") || "없음"}\n🏥 진료과: ${
-                out.dept.join(", ") || "없음"
-              }\n${out.flags.join(", ")}`
-            );
-          }}
-        >
-          증상 분석
-        </button>
-      </div>
-
-      <NearbyFinder />
     </div>
   );
 }
+/* ============================================================
+📌 증상 분석
+============================================================ */
+function analyzeSymptoms(text: string) {
+  const t = text.toLowerCase();
+  const hit = (r: RegExp) => r.test(t);
+
+  let otc = new Set<string>();
+  let dept = new Set<string>();
+  let flags = new Set<string>();
+
+  if (hit(/콧물|코막힘|재채기|비염/)) {
+    otc.add("항히스타민제(세티리진, 로라타딘 등)");
+    dept.add("이비인후과");
+  }
+  if (hit(/목/)) dept.add("호흡기내과");
+  if (hit(/열|오한/)) otc.add("해열진통제");
+  if (hit(/호흡곤란|숨참/)) flags.add("⚠ 즉시 진료 필요");
+
+  return {
+    otc: [...otc],
+    dept: [...dept],
+    flags: [...flags],
+  };
+}
+/* ============================================================
+📌 근처 병원/약국 찾기
+============================================================ */
+function NearbyFinder() {
+  const openSearch = (q: string) => {
+    window.open(`https://map.naver.com/v5/search/${encodeURIComponent(q)}`, "_blank");
+    window.open(`https://map.kakao.com/?q=${encodeURIComponent(q)}`, "_blank");
+  };
+
+  return (
+    <div className="mt-5 p-4 border rounded-xl bg-emerald-50 text-sm">
+      <div className="font-semibold mb-2">📍 근처 병원/약국 찾기</div>
+
+      <button
+        onClick={() => openSearch("약국")}
+        className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg mr-2"
+      >
+        약국
+      </button>
+
+      <button
+        onClick={() => openSearch("이비인후과")}
+        className="px-3 py-1.5 bg-white border rounded-lg"
+      >
+        이비인후과
+      </button>
+    </div>
+  );
+}
+{/* 증상 입력 */}
+<div className="mt-5 p-4 border rounded-xl bg-rose-50 text-sm">
+  <div className="font-semibold mb-1">📝 증상 기록</div>
+  <textarea
+    className="w-full border rounded-md p-2 text-sm"
+    rows={3}
+    value={symptom}
+    onChange={(e) => setSymptom(e.target.value)}
+    placeholder="예: 콧물, 코막힘, 재채기, 목아픔 등..."
+  />
+  <button
+    className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
+    onClick={() => {
+      const out = analyzeSymptoms(symptom);
+      alert(
+        `💊 약 추천: ${out.otc.join(", ") || "없음"}\n` +
+        `🏥 진료과: ${out.dept.join(", ") || "없음"}\n` +
+        `${out.flags.join(", ")}`
+      );
+    }}
+  >
+    증상 분석
+  </button>
+</div>
+
+{/* 근처 병원/약국 Finder */}
+<NearbyFinder />
