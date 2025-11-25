@@ -561,458 +561,234 @@ function makeWorkerURL() {
   const src = `
 const PRESETS = ${JSON.stringify(PRESETS)};
 
+// ------------------------------------------------------
+// 기본 유틸
+// ------------------------------------------------------
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 
 const movingAverage = (a, w) => {
   const h = Math.floor(w / 2);
-  const o = new Array(a.length).fill(0);
+  const out = new Array(a.length).fill(0);
   for (let i = 0; i < a.length; i++) {
     let s = 0, c = 0;
     for (let j = i - h; j <= i + h; j++) {
-      if (j >= 0 && j < a.length) {
-        s += a[j];
-        c++;
-      }
+      if (j >= 0 && j < a.length) { s += a[j]; c++; }
     }
-    o[i] = c ? s / c : 0;
+    out[i] = c ? s / c : 0;
   }
-  return o;
+  return out;
 };
 
 const quantile = (arr, q) => {
-  const s = Array.from(arr).filter(Number.isFinite).slice().sort((x, y) => x - y);
+  const s = Array.from(arr)
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
   if (!s.length) return 0;
   return s[Math.floor((s.length - 1) * q)];
 };
 
-function edgeEnergyFromImageData(data, w, h) {
-  let e = 0;
-  for (let y = 1; y < h - 1; y += 3) {
-    for (let x = 1; x < w - 1; x += 3) {
-      const i = (y * w + x) * 4;
-      const gx =
-        (0.2126 * data[i + 4] + 0.7152 * data[i + 5] + 0.0722 * data[i + 6]) -
-        (0.2126 * data[i - 4] + 0.7152 * data[i - 3] + 0.0722 * data[i - 2]);
-      const gy =
-        (0.2126 * data[i + 4 * w] + 0.7152 * data[i + 4 * w + 1] + 0.0722 * data[i + 4 * w + 2]) -
-        (0.2126 * data[i - 4 * w] + 0.7152 * data[i - 4 * w + 1] + 0.0722 * data[i - 4 * w + 2]);
-      const R = data[i], G = data[i + 1], B = data[i + 2];
-      const g = 0.2126 * R + 0.7152 * G + 0.0722 * B;
-      e += Math.abs(gx) + Math.abs(gy) + g * 0.001;
-    }
-  }
-  return e / (w * h);
-}
-
-function drawRotatedToCanvas(bitmap, deg, maxSide = 1400) {
+// ------------------------------------------------------
+// 이미지를 특정 각도로 돌려서 canvas에 그리기
+// ------------------------------------------------------
+function drawRotated(bitmap, deg) {
   const rad = (deg * Math.PI) / 180;
-  const sw = bitmap.width, sh = bitmap.height;
-  const scale = Math.min(1, maxSide / Math.max(sw, sh));
-  const bw = Math.round(sw * scale), bh = Math.round(sh * scale);
+  const sw = bitmap.width;
+  const sh = bitmap.height;
 
-  const base = new OffscreenCanvas(bw, bh);
-  const bctx = base.getContext("2d");
-  bctx.drawImage(bitmap, 0, 0, bw, bh);
+  const base = new OffscreenCanvas(sw, sh);
+  base.getContext("2d").drawImage(bitmap, 0, 0);
 
-  const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
-  const rw = Math.round(bw * cos + bh * sin), rh = Math.round(bw * sin + bh * cos);
-  const rot = new OffscreenCanvas(rw, rh);
-  const rctx = rot.getContext("2d");
-  rctx.translate(rw / 2, rh / 2);
-  rctx.rotate(rad);
-  rctx.drawImage(base, -bw / 2, -bh / 2);
-  return rot;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  const rw = Math.round(sw * cos + sh * sin);
+  const rh = Math.round(sw * sin + sh * cos);
+
+  const rotated = new OffscreenCanvas(rw, rh);
+  const ctx = rotated.getContext("2d");
+  ctx.translate(rw / 2, rh / 2);
+  ctx.rotate(rad);
+  ctx.drawImage(base, -sw / 2, -sh / 2);
+  return rotated;
 }
 
-function findWindowRect(c) {
+// ------------------------------------------------------
+// 윈도우 자동 탐지 (Control + Test 라인 전체가 포함된 ROI)
+// ------------------------------------------------------
+function autoDetectWindow(c) {
   const ctx = c.getContext("2d");
   const w = c.width, h = c.height;
   const img = ctx.getImageData(0, 0, w, h).data;
 
-  const br = new Float32Array(w * h);
-  const sat = new Float32Array(w * h);
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * 4;
-      const R = img[i], G = img[i + 1], B = img[i + 2];
-      const max = Math.max(R, G, B), min = Math.min(R, G, B);
-      br[y * w + x] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
-      sat[y * w + x] = max === 0 ? 0 : (max - min) / max;
-    }
+  const bright = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const R = img[i * 4];
+    const G = img[i * 4 + 1];
+    const B = img[i * 4 + 2];
+    bright[i] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
   }
 
-  const col = new Float32Array(w), row = new Float32Array(h);
+  const col = new Float32Array(w);
+  const row = new Float32Array(h);
   for (let x = 0; x < w; x++) {
     let s = 0;
-    for (let y = 0; y < h; y++) s += br[y * w + x];
+    for (let y = 0; y < h; y++) s += bright[y * w + x];
     col[x] = s / h;
   }
   for (let y = 0; y < h; y++) {
     let s = 0;
-    for (let x = 0; x < w; x++) s += br[y * w + x];
+    for (let x = 0; x < w; x++) s += bright[y * w + x];
     row[y] = s / w;
   }
 
   const dcol = movingAverage(
     Array.from(col).map((v, i) => (i ? Math.abs(v - col[i - 1]) : 0)),
-    Math.max(9, Math.floor(w / 40))
+    Math.max(7, Math.floor(w / 40))
   );
+
   const drow = movingAverage(
     Array.from(row).map((v, i) => (i ? Math.abs(v - row[i - 1]) : 0)),
-    Math.max(9, Math.floor(h / 40))
+    Math.max(7, Math.floor(h / 40))
   );
 
-  const thx = quantile(dcol, 0.9), thy = quantile(drow, 0.9);
+  const thx = quantile(dcol, 0.88);
+  const thy = quantile(drow, 0.88);
 
   const xs = [];
-  for (let i = 1; i < w - 1; i++) {
-    if (dcol[i] > thx && dcol[i] >= dcol[i - 1] && dcol[i] > dcol[i + 1]) xs.push(i);
-  }
   const ys = [];
-  for (let i = 1; i < h - 1; i++) {
-    if (drow[i] > thy && drow[i] >= drow[i - 1] && drow[i] > drow[i + 1]) ys.push(i);
-  }
+  for (let i = 1; i < w - 1; i++) if (dcol[i] > thx) xs.push(i);
+  for (let i = 1; i < h - 1; i++) if (drow[i] > thy) ys.push(i);
 
   const pick = (arr, N) => {
-    if (arr.length < 2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
-    let L = arr[0], R = arr[arr.length - 1], gap = R - L;
-    for (let i = 0; i < arr.length; i++) {
-      for (let j = i + 1; j < arr.length; j++) {
-        const g = arr[j] - arr[i];
-        if (g > gap) {
-          gap = g;
-          L = arr[i];
-          R = arr[j];
-        }
-      }
-    }
-    if (gap < N * 0.2) return [Math.round(N * 0.12), Math.round(N * 0.88)];
-    return [L, R];
+    if (arr.length < 2) return [Math.round(N * 0.15), Math.round(N * 0.85)];
+    return [arr[0], arr[arr.length - 1]];
   };
 
-  let tmp = pick(xs, w);
-  let x0 = tmp[0], x1 = tmp[1];
-  tmp = pick(ys, h);
-  let y0 = tmp[0], y1 = tmp[1];
+  let [x0, x1] = pick(xs, w);
+  let [y0, y1] = pick(ys, h);
 
-  const padX = Math.round((x1 - x0) * 0.03);
-  const padY = Math.round((y1 - y0) * 0.05);
-  x0 = clamp(x0 + padX, 0, w - 2);
-  x1 = clamp(x1 - padX, 1, w - 1);
-  y0 = clamp(y0 + padY, 0, h - 2);
-  y1 = clamp(y1 - padY, 1, h - 1);
+  x0 = clamp(x0 - 5, 0, w - 2);
+  x1 = clamp(x1 + 5, 1, w - 1);
+  y0 = clamp(y0 - 5, 0, h - 2);
+  y1 = clamp(y1 + 5, 1, h - 1);
 
-  const glareMask = new Uint8Array(w * h);
-  const brHi = quantile(br, 0.965), brLo = quantile(br, 0.05);
-  for (let i = 0; i < w * h; i++) {
-    if (br[i] > brHi) glareMask[i] = 1;
-    if (br[i] < brLo * 0.6) glareMask[i] = 1;
-  }
-// === [추가] Crop 내부 glare hard clipping ===
-// 플라스틱 반사/로고 반사 제거
-const localBright = quantile(br, 0.90);
-const hardClip = localBright * 0.95;
-
-for (let y = y0; y <= y1; y++) {
-  for (let x = x0; x <= x1; x++) {
-    const k = y * w + x;
-    if (br[k] > hardClip) {
-      glareMask[k] = 1; // 과노출 픽셀 제거
-    }
-  }
+  return { x0, x1, y0, y1 };
 }
 
-  const win = [];
-  for (let yy = y0; yy <= y1; yy++) {
-    for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
-  }
-  const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
-  let a = 255 / Math.max(1, p99 - p1);
-  const b = -a * p1;
-  a = a * 1.4;  // contrast 강화
-
-  for (let yy = y0; yy <= y1; yy++) {
-    for (let xx = x0; xx <= x1; xx++) {
-      const k = yy * w + xx;
-      br[k] = clamp(a * br[k] + b, 0, 255);
-    }
-  }
-
-  return { x0, x1, y0, y1, glareMask, br };
-}
-
-function analyzeWindow(c, rect) {
+// ------------------------------------------------------
+// ROI 내부 색 프로파일로 peak 찾기
+// ------------------------------------------------------
+function analyzeROI(c, rect) {
   const ctx = c.getContext("2d");
+  const img = ctx.getImageData(0, 0, c.width, c.height).data;
   const w = c.width;
-  const data = ctx.getImageData(0, 0, c.width, c.height).data;
-  const x0 = rect.x0, x1 = rect.x1, y0 = rect.y0, y1 = rect.y1;
-  const glareMask = rect.glareMask;
 
-  const profX = [], profY = [];
-
-  for (let x = x0; x <= x1; x++) {
+  const profX = [];
+  for (let x = rect.x0; x <= rect.x1; x++) {
     let s = 0, cnt = 0;
-    for (let y = y0; y <= y1; y++) {
-      const i = y * w + x;
-      const ii = i * 4;
-      if (glareMask[i]) continue;
-      const R = data[ii], G = data[ii + 1], B = data[ii + 2];
+    for (let y = rect.y0; y <= rect.y1; y++) {
+      const i = (y * w + x) * 4;
+      const R = img[i], G = img[i + 1], B = img[i + 2];
       const sum = R + G + B || 1;
-      const chroma = Math.max(0, R / sum - 0.5 * ((G / sum) + (B / sum)));
-      s += chroma;
-      cnt++;
+      const chroma = Math.max(0, R / sum - 0.5 * (G / sum + B / sum));
+      s += chroma; cnt++;
     }
-    profX.push(cnt ? s / cnt : 0);
+    profX.push(s / cnt);
   }
 
-  for (let y = y0; y <= y1; y++) {
-    let s = 0, cnt = 0;
-    for (let x = x0; x <= x1; x++) {
-      const i = y * w + x;
-      const ii = i * 4;
-      if (glareMask[i]) continue;
-      const R = data[ii], G = data[ii + 1], B = data[ii + 2];
-      const sum = R + G + B || 1;
-      const chroma = Math.max(0, R / sum - 0.5 * ((G / sum) + (B / sum)));
-      s += chroma;
-      cnt++;
-    }
-    profY.push(cnt ? s / cnt : 0);
-  }
-
-  return { profX, profY };
+  return { profX };
 }
 
-function peaksFromProfile(arr) {
-  const bg = movingAverage(arr, Math.max(11, Math.floor(arr.length / 14)));
+// ------------------------------------------------------
+// Peak 추출
+// ------------------------------------------------------
+function getPeaks(arr) {
+  const bg = movingAverage(arr, Math.max(9, Math.floor(arr.length / 12)));
   const detr = arr.map((v, i) => bg[i] - v);
-  const mean = detr.reduce((a, b) => a + b, 0) / Math.max(1, detr.length);
-  const q25 = quantile(detr, 0.25), q75 = quantile(detr, 0.75);
-  const iqr = Math.max(1e-6, q75 - q25);
-  const sigma = iqr / 1.349;
-  const z = detr.map((v) => (v - mean) / (sigma || 1));
-  const edgeMargin = Math.max(4, Math.floor(arr.length * 0.04));
+
+  const q25 = quantile(detr, 0.25);
+  const q75 = quantile(detr, 0.75);
+  const sigma = Math.max(1e-6, (q75 - q25) / 1.349);
+
+  const z = detr.map((v) => (v - q25) / sigma);
+
   const peaks = [];
-
-  for (let i = 1; i < z.length - 1; i++) {
-    if (z[i] >= z[i - 1] && z[i] > z[i + 1]) {
-      if (i < edgeMargin || z.length - 1 - i < edgeMargin) continue;
-      const half = z[i] * 0.5;
-      let L = i, R = i, area = z[i];
-      while (L > 0 && z[L] > half) {
-        L--;
-        area += z[L];
-      }
-      while (R < z.length - 1 && z[R] > half) {
-        R++;
-        area += z[R];
-      }
-      peaks.push({ idx: i, z: z[i], width: R - L, area });
+  for (let i = 2; i < z.length - 2; i++) {
+    if (z[i] > z[i - 1] && z[i] > z[i + 1] && z[i] > 0.4) {
+      peaks.push({ idx: i, z: z[i] });
     }
   }
-
-  peaks.sort((a, b) => b.z - a.z);
-  const quality = (peaks[0] ? peaks[0].z : 0) + 0.8 * (peaks[1] ? peaks[1].z : 0);
-  return { z, peaks, quality };
+  return peaks.sort((a, b) => b.z - a.z);
 }
 
-function analyzeCore(bitmap, sensitivity, controlPos, requireTwoLines, crop) {
-  const angles = [];
-  for (let a = -18; a <= 18; a += 2) angles.push(a);
+// ------------------------------------------------------
+// MPO/ECP **정확한 라벨링 로직 (v6.1 핵심 패치)**  
+// ------------------------------------------------------
+function assignMPOECP(peaks, controlIdx) {
+  const byDist = peaks
+    .map((p) => ({ ...p, dist: Math.abs(p.idx - controlIdx) }))
+    .sort((a, b) => a.dist - b.dist);
 
-  let best = null;
-  for (const a of angles) {
-    const c = drawRotatedToCanvas(bitmap, a);
+  const mpo = byDist[0] || null;
+  const ecp = byDist[1] || null;
+
+  return { mpo, ecp };
+}
+
+// ------------------------------------------------------
+// 메인 core 분석
+// ------------------------------------------------------
+function analyzeCore(bitmap, sensitivity, crop) {
+  let bestCanvas = null;
+  let bestEnergy = -999;
+
+  for (let a = -14; a <= 14; a += 2) {
+    const c = drawRotated(bitmap, a);
     const ctx = c.getContext("2d");
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-    const e = edgeEnergyFromImageData(img.data, c.width, c.height);
-    if (!best || e > best.energy) best = { angle: a, canvas: c, energy: e };
+    const img = ctx.getImageData(0, 0, c.width, c.height).data;
+
+    let e = 0;
+    for (let i = 0; i < img.length; i += 20) e += img[i];
+    if (e > bestEnergy) {
+      bestEnergy = e;
+      bestCanvas = c;
+    }
   }
 
-  const out = best.canvas;
-  const octx = out.getContext("2d");
+  const c = bestCanvas;
+  const rect = crop || autoDetectWindow(c);
+  const prof = analyzeROI(c, rect);
+  const peaks = getPeaks(prof.profX);
 
-  let rect;
-  if (crop && crop.w > 4 && crop.h > 4) {
-    const w = out.width, h = out.height;
-    let x0 = Math.max(0, Math.min(w - 2, Math.round(crop.x)));
-    let y0 = Math.max(0, Math.min(h - 2, Math.round(crop.y)));
-    let x1 = Math.max(x0 + 1, Math.min(w - 1, Math.round(crop.x + crop.w)));
-    let y1 = Math.max(y0 + 1, Math.min(h - 1, Math.round(crop.y + crop.h)));
+  if (!peaks.length) return { ok: false, reason: "nopeaks", rect };
 
-    const img = octx.getImageData(0, 0, w, h);
-    const data = img.data;
-    const br = new Float32Array(w * h);
-    const sat = new Float32Array(w * h);
+  const control = peaks[0];
+  const tests = peaks.slice(1);
 
-    for (let yy = 0; yy < h; yy++) {
-      for (let xx = 0; xx < w; xx++) {
-        const i = (yy * w + xx) * 4;
-        const R = data[i], G = data[i + 1], B = data[i + 2];
-        const max = Math.max(R, G, B), min = Math.min(R, G, B);
-        br[yy * w + xx] = 0.2126 * R + 0.7152 * G + 0.0722 * B;
-        sat[yy * w + xx] = max === 0 ? 0 : (max - min) / max;
-      }
-    }
+  if (!control || control.z < 0.8)
+    return { ok: false, reason: "noControl", rect };
 
-    const glareMask = new Uint8Array(w * h);
-    const brHi = quantile(br, 0.965), brLo = quantile(br, 0.05);
-    for (let i = 0; i < w * h; i++) {
-      if (br[i] > brHi) glareMask[i] = 1;
-      if (br[i] < brLo * 0.6) glareMask[i] = 1;
-    }
+  const { mpo, ecp } = assignMPOECP(tests, control.idx);
 
-    const win = [];
-    for (let yy = y0; yy <= y1; yy++) {
-      for (let xx = x0; xx <= x1; xx++) win.push(br[yy * w + xx]);
-    }
-    const p1 = quantile(win, 0.01), p99 = quantile(win, 0.99) || 1;
-    let a = 255 / Math.max(1, p99 - p1);
-    const b = -a * p1;
-    a = a * 1.4;
-    for (let yy = y0; yy <= y1; yy++) {
-      for (let xx = x0; xx <= x1; xx++) {
-        const k = yy * w + xx;
-        br[k] = clamp(a * br[k] + b, 0, 255);
-      }
-    }
-
-    rect = { x0, x1, y0, y1, glareMask, br };
-  } else {
-    rect = findWindowRect(out);
-  }
-
-  const profiles = analyzeWindow(out, rect);
-  const px = peaksFromProfile(profiles.profX);
-  const py = peaksFromProfile(profiles.profY);
-
-  const h = rect.y1 - rect.y0;
-  const w2 = rect.x1 - rect.x0;
-
-  let axis;
-  if (h > w2 * 1.15) {
-    axis = py.quality >= px.quality * 0.85 ? "y" : "x";
-  } else {
-    axis = px.quality >= py.quality ? "x" : "y";
-  }
-
-  const sel = axis === "x" ? px : py;
-  const unit = axis === "x" ? rect.x1 - rect.x0 : rect.y1 - rect.y0;
   const preset = PRESETS[sensitivity];
+  const absMin = preset.TEST_MIN_ABS * 0.7;
+  const relMin = preset.TEST_MIN_REL * 0.7;
 
-  const maxWidth = Math.max(3, Math.round(unit * preset.MAX_WIDTH_FRAC));
-  const valid = sel.peaks.filter((p) => p.width <= maxWidth && p.z > 0.45);
+  const pos = (t) => (t ? t.z >= absMin || t.z >= control.z * relMin : false);
 
-  if (!valid.length) {
-    return { ok: false, reason: "nopeaks", rect, axis };
-  }
-
-  // Control = 가장 강한 peak
-const control = valid.slice().sort((a, b) => b.z - a.z)[0];
-
-const tests = valid.filter((p) => p !== control);
-
-// peak 색상 계산용: redScore, blueScore 추가
-function getColorScore(p, axisProfile) {
-  // 주변 샘플 5픽셀 평균
-  const win = 3;
-  let rSum = 0, bSum = 0, c = 0;
-
-  for (let i = p.idx - win; i <= p.idx + win; i++) {
-    if (i < 0 || i >= axisProfile.length) continue;
-    rSum += axisProfile[i].red;
-    bSum += axisProfile[i].blue;
-    c++;
-  }
-
-  return {
-    redScore: rSum / Math.max(1, c),
-    blueScore: bSum / Math.max(1, c)
-  };
-}
-
-// axisProfile 구성
-const axisProfile = [];
-for (let i = 0; i < sel.z.length; i++) {
-  axisProfile.push({
-    red: profiles.profX ? profiles.profX[i] : profiles.profY[i],
-    blue: profiles.profX ? profiles.profX[i] : profiles.profY[i]
-  });
-}
-
-// 왼쪽/오른쪽 peak 구분
-const left = tests
-  .filter((p) => p.idx < control.idx)
-  .sort((a, b) => b.z - a.z)[0];
-
-const right = tests
-  .filter((p) => p.idx > control.idx)
-  .sort((a, b) => b.z - a.z)[0];
-
-// MPO/ECP 초기값
-let mpo = null, ecp = null;
-
-// 색 기반 판정
-function isRed(score) {
-  return score.redScore > score.blueScore;
-}
-
-function isBlue(score) {
-  return score.blueScore > score.redScore;
-}
-
-if (left) {
-  const s = getColorScore(left, axisProfile);
-  if (isRed(s)) ecp = left;
-  else mpo = left;
-}
-
-if (right) {
-  const s = getColorScore(right, axisProfile);
-  if (isRed(s)) ecp = right;
-  else mpo = right;
-}
-
-
-  const absMin = preset.TEST_MIN_ABS * 0.55;
-  const relMin = preset.TEST_MIN_REL * 0.65;
-  const areaFrac = preset.MIN_AREA_FRAC * 0.65;
-
-  function testPositive(ctrl, t) {
-    if (!t) return false;
-    const absOK = t.z >= absMin;
-    const relOK = t.z >= ctrl.z * relMin;
-    const areaOK = t.area >= ctrl.area * areaFrac;
-    return areaOK && (absOK || relOK);
-  }
-
-  const mpoPos = testPositive(control, mpo);
-  const ecpPos = testPositive(control, ecp);
+  const mpoPos = pos(mpo);
+  const ecpPos = pos(ecp);
 
   let diagnosis = "none";
   if (mpoPos && ecpPos) diagnosis = "mixed";
   else if (mpoPos) diagnosis = "bacterial";
   else if (ecpPos) diagnosis = "allergic";
 
-  let verdict = "Negative";
-  if (mpoPos || ecpPos) verdict = "Positive";
-
-  const confidence = control.z > 1.8 ? "확실" : "보통";
-  const detail =
-    "C=" +
-    control.z.toFixed(2) +
-    ", MPO=" +
-    (mpo ? mpo.z.toFixed(2) : "0.00") +
-    ", ECP=" +
-    (ecp ? ecp.z.toFixed(2) : "0.00");
-
   return {
     ok: true,
     result: {
-      verdict,
-      detail,
-      confidence,
+      verdict: mpoPos || ecpPos ? "Positive" : "Negative",
+      detail: \`C=\${control.z.toFixed(2)}, MPO=\${mpo ? mpo.z.toFixed(2) : 0}, ECP=\${ecp ? ecp.z.toFixed(2) : 0}\`,
+      confidence: control.z > 1.7 ? "확실" : "보통",
       diagnosis,
       ecpPositive: !!ecpPos,
       mpoPositive: !!mpoPos,
@@ -1021,20 +797,12 @@ if (right) {
 }
 
 self.onmessage = async (ev) => {
+  const { bitmap, sensitivity, crop } = ev.data;
   try {
-    const data = ev.data;
-    const res = analyzeCore(
-      data.bitmap,
-      data.sensitivity,
-      data.controlPos,
-      data.requireTwoLines,
-      data.crop
-    );
-    self.postMessage(res);
-  } catch (err) {
-    let msg = "worker-error";
-    if (err && err.message) msg = err.message;
-    self.postMessage({ ok: false, reason: msg });
+    const out = analyzeCore(bitmap, sensitivity, crop);
+    self.postMessage(out);
+  } catch (e) {
+    self.postMessage({ ok: false, reason: "worker-fail" });
   }
 };
 `;
@@ -1042,6 +810,7 @@ self.onmessage = async (ev) => {
   const blob = new Blob([src], { type: "application/javascript" });
   return URL.createObjectURL(blob);
 }
+
 
 // -----------------------------
 // 메인 컴포넌트
