@@ -1,6 +1,8 @@
  "use client";
 
 import React, { useRef, useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+
 
 /* ============================================================
    📌 타입 정의
@@ -310,6 +312,9 @@ export default function LfaAnalyzer() {
   const [result, setResult] = useState<AnalyzeOut | null>(null);
   const [symptom, setSymptom] = useState("");
 
+    const router = useRouter();
+
+
     const resetAll = () => {
     setImageUrl(null);
     setCropBox(null);
@@ -346,11 +351,12 @@ export default function LfaAnalyzer() {
   return (
     <div className="max-w-4xl mx-auto p-4">
     <h1
-  onClick={() => window.location.reload()}
+  onClick={() => router.push("/")}
   className="text-lg font-semibold mb-4 cursor-pointer select-none hover:text-indigo-600 transition"
 >
   📸 LFA QuickCheck — Crop + 3-Zone
 </h1>
+
 
 
 
