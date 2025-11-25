@@ -30,12 +30,23 @@ function CropBox({
 }) {
   const [box, setBox] = useState<CropRect | null>(null);
 
+  // 👉 화면 좌표 변환용 scale 계산
+  const scaleX = (() => {
+    if (!canvasRef.current) return 1;
+    const rect = canvasRef.current.getBoundingClientRect();
+    return canvasRef.current.width / rect.width;
+  })();
+
+  const scaleY = (() => {
+    if (!canvasRef.current) return 1;
+    const rect = canvasRef.current.getBoundingClientRect();
+    return canvasRef.current.height / rect.height;
+  })();
+
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
 
     const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = canvasRef.current.width / rect.width;
-    const scaleY = canvasRef.current.height / rect.height;
 
     setBox({
       x0: (e.clientX - rect.left) * scaleX,
@@ -49,8 +60,6 @@ function CropBox({
     if (!canvasRef.current || !box) return;
 
     const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = canvasRef.current.width / rect.width;
-    const scaleY = canvasRef.current.height / rect.height;
 
     setBox({
       ...box,
@@ -74,10 +83,10 @@ function CropBox({
         <div
           className="absolute border-2 border-red-500"
           style={{
-            left: Math.min(box.x0, box.x1),
-            top: Math.min(box.y0, box.y1),
-            width: Math.abs(box.x1 - box.x0),
-            height: Math.abs(box.y1 - box.y0),
+            left: Math.min(box.x0, box.x1) / scaleX,
+            top: Math.min(box.y0, box.y1) / scaleY,
+            width: Math.abs(box.x1 - box.x0) / scaleX,
+            height: Math.abs(box.y1 - box.y0) / scaleY,
           }}
         />
       )}
@@ -85,57 +94,6 @@ function CropBox({
   );
 }
 
-/* ============================================================
-📌 3-zone Overlay (가로 3분할 C / MPO / ECP)
-============================================================ */
-function CropZoneOverlay({ rect }: { rect: CropRect | null }) {
-  if (!rect) return null;
-
-  const x = Math.min(rect.x0, rect.x1);
-  const y = Math.min(rect.y0, rect.y1);
-  const w = Math.abs(rect.x1 - rect.x0);
-  const h = Math.abs(rect.y1 - rect.y0);
-
-  const zoneW = w / 3; // 가로 방향 3등분
-
-  return (
-    <div className="absolute inset-0 pointer-events-none">
-      {/* C */}
-      <div
-        className="absolute border border-green-400"
-        style={{
-          left: x,
-          top: y,
-          width: zoneW,
-          height: h,
-          background: "rgba(0,255,0,0.1)",
-        }}
-      />
-      {/* MPO */}
-      <div
-        className="absolute border border-blue-400"
-        style={{
-          left: x + zoneW,
-          top: y,
-          width: zoneW,
-          height: h,
-          background: "rgba(0,0,255,0.1)",
-        }}
-      />
-      {/* ECP */}
-      <div
-        className="absolute border border-yellow-400"
-        style={{
-          left: x + zoneW * 2,
-          top: y,
-          width: zoneW,
-          height: h,
-          background: "rgba(255,255,0,0.1)",
-        }}
-      />
-    </div>
-  );
-}
 
 /* ============================================================
 📌 가로 3-zone + 세로줄 탐지 알고리즘
