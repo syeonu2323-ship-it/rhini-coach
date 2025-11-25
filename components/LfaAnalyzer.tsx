@@ -149,41 +149,45 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
   const w = Math.abs(rect.x1 - rect.x0);
   const h = Math.abs(rect.y1 - rect.y0);
 
-  const zoneH = Math.floor(h / 3);
+  const zoneH = Math.floor(h / 3); // 세로로 3개 나눔
+
   const img = ctx.getImageData(x, y, w, h);
   const d = img.data;
 
-  const detectLine = (yStart: number, yEnd: number) => {
-    let minRow = Infinity;
-    let maxRow = -Infinity;
+  // 🔥 세로줄(Vertical Line) 탐지 알고리즘 
+  const detectVerticalLine = (yStart: number, yEnd: number) => {
+    let minCol = Infinity;
+    let maxCol = -Infinity;
 
-    for (let row = yStart; row < yEnd; row++) {
-      let sum = 0;
-      for (let col = 0; col < w; col++) {
+    for (let col = 0; col < w; col++) {
+      let colSum = 0;
+      for (let row = yStart; row < yEnd; row++) {
         const i = (row * w + col) * 4;
         const r = d[i], g = d[i + 1], b = d[i + 2];
         const gray = r * 0.3 + g * 0.59 + b * 0.11;
-        sum += gray;
+        colSum += gray;
       }
-      const avg = sum / w;
-      minRow = Math.min(minRow, avg);
-      maxRow = Math.max(maxRow, avg);
+      const colAvg = colSum / (yEnd - yStart);
+
+      minCol = Math.min(minCol, colAvg);
+      maxCol = Math.max(maxCol, colAvg);
     }
 
-    return maxRow - minRow > 18; // contrast threshold
+    // vertical contrast가 크면 선이 있음
+    return maxCol - minCol > 18;
   };
 
-  const Cdet = detectLine(0, zoneH);
-  const Mdet = detectLine(zoneH, zoneH * 2);
-  const Edet = detectLine(zoneH * 2, zoneH * 3);
+  const Cdet = detectVerticalLine(0, zoneH);
+  const Mdet = detectVerticalLine(zoneH, zoneH * 2);
+  const Edet = detectVerticalLine(zoneH * 2, zoneH * 3);
 
   if (!Cdet) {
     return {
       verdict: "Invalid",
-      detail: "Control 라인 없음 → 무효",
+      detail: "C line missing",
       diagnosis: "none",
-      mpoPositive: false,
       ecpPositive: false,
+      mpoPositive: false,
     };
   }
 
@@ -207,6 +211,7 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
     ecpPositive,
   };
 }
+
 
 /* ============================================================
    📌 증상 분석
