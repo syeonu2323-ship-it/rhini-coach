@@ -371,7 +371,15 @@ self.onmessage = async (ev) => {
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<AnalyzeResult["result"] | null>(null);
+  const [result, setResult] = useState<{
+  verdict: Verdict;
+  detail: string;
+  confidence: "확실" | "보통" | "약함";
+  diagnosis: Diagnosis;
+  ecpPositive: boolean;
+  mpoPositive: boolean;
+} | null>(null);
+
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const procRef = useRef<HTMLCanvasElement | null>(null);
