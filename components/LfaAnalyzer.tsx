@@ -291,24 +291,25 @@ function analyzeSymptoms(text: string) {
   let flags: string[] = [];
 
   if (hit(/비염|콧물|코막힘|재채기|가려움/)) {
-    otc.push("항히스타민(세티리진/로라타딘)");
-    otc.push("비충혈제거제(단기)");
-    dept.push("이비인후과");
-  }
+  otc.push("항히스타민(세티리진/로라타딘)");
+  otc.push("비충혈 제거제(단기)");
+  dept.push("이비인후과");
+}
 
-  if (hit(/열|발열|오한|근육통/)) {
-    otc.push("해열진통제(아세트아미노펜)");
-    dept.push("내과");
-  }
+if (hit(/열|발열|오한|근육통/)) {
+  otc.push("해열진통제(아세트아미노펜)");
+  dept.push("내과");
+}
 
-  if (hit(/기침|가래|호흡곤란/)) {
-    otc.push("기침억제제·거담제");
-    dept.push("호흡기내과");
-  }
+if (hit(/기침|가래|호흡곤란/)) {
+  otc.push("기침 억제제·거담제");
+  dept.push("호흡기내과");
+}
 
-  if (hit(/호흡곤란|청색증|의식저하/)) {
-    flags.push("⚠️ 응급 증상 가능. 즉시 진료 필요");
-  }
+if (hit(/호흡곤란|청색증|의식저하/)) {
+  flags.push("⚠️ 응급 증상 가능. 즉시 진료 필요");
+}
+
 
   return {
     otc: [...new Set(otc)],
