@@ -264,11 +264,11 @@ self.onmessage = async (ev) => {
 
     const mask = new Uint8Array(width * height);
 
-    // 1) RGB→HSV + 붉은 마스크
+    // RGB → HSV로 붉은 픽셀 마스크
     for (let i = 0; i < width * height; i++) {
-      const r = data[i*4]/255;
-      const g = data[i*4+1]/255;
-      const b = data[i*4+2]/255;
+      const r = data[i*4] / 255;
+      const g = data[i*4+1] / 255;
+      const b = data[i*4+2] / 255;
 
       const mx = Math.max(r,g,b);
       const mn = Math.min(r,g,b);
@@ -285,85 +285,67 @@ self.onmessage = async (ev) => {
       const s = mx === 0 ? 0 : d/mx;
       const v = mx;
 
-      if ((h < 25 || h > 330) && s > 0.35 && v > 0.25) mask[i] = 1;
-    }
-
-    // 2) Blob 자동 탐지
-    const visited = new Uint8Array(width * height);
-    const blobs = [];
-
-    for (let i = 0; i < width * height; i++) {
-      if (mask[i] && !visited[i]) {
-        const q = [i];
-        visited[i] =1;
-
-        let count=0;
-        let minY=height, maxY=0;
-
-        while(q.length){
-          const p = q.pop();
-          count++;
-          const y = (p/width)|0;
-          minY = Math.min(minY,y);
-          maxY = Math.max(maxY,y);
-
-          const nb=[p-1,p+1,p-width,p+width];
-          for(const n of nb){
-            if(n>=0 && n < width*height && mask[n] && !visited[n]){
-              visited[n]=1;
-              q.push(n);
-            }
-          }
-        }
-
-        // 더 강한 필터 (약한 잡음 삭제, 실제 라인만 남김)
-if (count > 80 && (maxY - minY) > 4) {
-  blobs.push({
-    count,
-    centerY: (minY + maxY) / 2
-  });
-}
-
+      if ((h < 25 || h > 330) && s > 0.35 && v > 0.25) {
+        mask[i] = 1;
       }
     }
 
-    if(blobs.length===0){
-      self.postMessage({ok:false, reason:"no-lines"});
+    // 🔥 가로형 3라인 → x축 3등분
+    const C_area = [0, width * 0.33];
+    const M_area = [width * 0.33, width * 0.66];
+    const E_area = [width * 0.66, width];
+
+    let C_red = 0, M_red = 0, E_red = 0;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        if (!mask[idx]) continue;
+
+        if (x >= C_area[0] && x < C_area[1]) C_red++;
+        else if (x >= M_area[0] && x < M_area[1]) M_red++;
+        else if (x >= E_area[0] && x < E_area[1]) E_red++;
+      }
+    }
+
+    // 각 영역이 실제로 라인인지 threshold 기반 판단
+    const TH = 150;  // 필요하면 조절 가능
+
+    const C_ok = C_red > TH;
+    const mpo = M_red > TH;
+    const ecp = E_red > TH;
+
+    if (!C_ok) {
+      self.postMessage({ ok:false, reason:"control-missing" });
       return;
     }
 
-    blobs.sort((a,b)=>a.centerY-b.centerY);
+    const diagnosis =
+      mpo && ecp ? "mixed" :
+      mpo ? "bacterial" :
+      ecp ? "allergic" :
+      "none";
 
-    const C = blobs[0];
-    const M = blobs[1] || null;
-    const E = blobs[2] || null;
-
-    const mpo = !!M;
-    const ecp = !!E;
+    const verdict = (mpo || ecp) ? "Positive" : "Negative";
 
     self.postMessage({
-      ok:true,
-      result:{
-        verdict: mpo || ecp ? "Positive":"Negative",
-        detail: \`C=OK | MPO=\${mpo} | ECP=\${ecp}\`,
-        confidence:"확실",
-        diagnosis:
-          mpo && ecp ? "mixed" :
-          mpo ? "bacterial" :
-          ecp ? "allergic" :
-          "none",
-        mpoPositive:mpo,
-        ecpPositive:ecp
+      ok: true,
+      result: {
+        verdict,
+        detail: \`C=\${C_ok} | MPO=\${mpo} | ECP=\${ecp}\`,
+        confidence: "확실",
+        diagnosis,
+        mpoPositive: mpo,
+        ecpPositive: ecp
       }
     });
 
-  } catch(e){
-    self.postMessage({ok:false, reason:"worker-error"});
+  } catch (e) {
+    self.postMessage({ ok:false, reason:"worker-error" });
   }
 };
 `;
-
-  return URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
+return URL.createObjectURL(new Blob([src], {type: "application/javascript"}));
 }
 
 /* ---------------------------------------------------------------------
