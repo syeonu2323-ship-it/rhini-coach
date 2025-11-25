@@ -151,36 +151,55 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
   const d = img.data;
 
   // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
-const detectZoneRed = (xStart: number, xEnd: number) => {
-  let total = 0;
-  let count = 0;
+const detectZoneHueRed = (xStart: number, xEnd: number) => {
+  let totalRedPixels = 0;
+  let totalPixels = 0;
 
   for (let col = xStart; col < xEnd; col++) {
     for (let row = 0; row < h; row++) {
       const i = (row * w + col) * 4;
-      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const r = d[i], g = d[i+1], b = d[i+2];
 
-      // 🔥 전체 칸에서 붉은 성분 기반 강화
-      const redBoost = r - 0.5 * (g + b);
+      // Normalize to 0~1
+      const rn = r / 255, gn = g / 255, bn = b / 255;
 
-      total += Math.max(0, redBoost);
-      count++;
+      const max = Math.max(rn, gn, bn);
+      const min = Math.min(rn, gn, bn);
+      const delta = max - min;
+
+      // Hue 계산 (0~360)
+      let H = 0;
+      if (delta !== 0) {
+        if (max === rn) H = ((gn - bn) / delta) % 6;
+        else if (max === gn) H = (bn - rn) / delta + 2;
+        else H = (rn - gn) / delta + 4;
+      }
+      H *= 60;
+      if (H < 0) H += 360;
+
+      // 빨간색 Hue 범위: 340~360 또는 0~20
+      const isRedHue = H <= 20 || H >= 340;
+
+      if (isRedHue) totalRedPixels++;
+      totalPixels++;
     }
   }
 
-  // 전체 zone 평균 redBoost
-  return total / count;
+  // zone 전체 픽셀 중 "붉은색" 비율
+  return totalRedPixels / totalPixels;
 };
 
-// 🎯 D 방식 최적 threshold
-const Cavg = detectZoneRed(0, zoneW);
-const Mavg = detectZoneRed(zoneW, zoneW * 2);
-const Eavg = detectZoneRed(zoneW * 2, zoneW * 3);
 
-// 🔥 빨간색 평균값 기반 threshold
-const Cdet = Cavg > 0.9;    // control은 항상 진하게 → threshold 높게
-const Mdet = Mavg > 0.25;   // T-lines는 약함 → threshold 낮게
-const Edet = Eavg > 0.25;
+const Cscore = detectZoneHueRed(0, zoneW);
+const Mscore = detectZoneHueRed(zoneW, zoneW * 2);
+const Escore = detectZoneHueRed(zoneW * 2, zoneW * 3);
+
+// Control은 무조건 확실하고 두껍기 때문에 0.08~ 이상
+const Cdet = Cscore > 0.06;
+
+// Test 라인은 얇고 피그먼트 약함 → 0.015~ 기준이 안정적
+const Mdet = Mscore > 0.015;
+const Edet = Escore > 0.015;
 
 
   if (!Cdet) {
