@@ -152,30 +152,28 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
 
   // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
   const detectVertical = (xStart: number, xEnd: number) => {
-  let lineStrength = 0;
-  const zoneWidth = xEnd - xStart;
+  let peak = 0;
 
   for (let col = xStart; col < xEnd; col++) {
-    let rSum = 0, gSum = 0, bSum = 0;
+    let colSum = 0;
 
     for (let row = 0; row < h; row++) {
       const i = (row * w + col) * 4;
       const r = d[i], g = d[i + 1], b = d[i + 2];
 
-      // 🔥 "줄"만 강하게 검출하는 적색 강화값
+      // 붉은 라인 강조 (중요)
       const redBoost = r - (g + b) * 0.5;
-      rSum += Math.max(0, redBoost);
+      colSum += Math.max(0, redBoost);
     }
 
-    const colAvg = rSum / h;
-    lineStrength += colAvg;
+    const colAvg = colSum / h;
+
+    // 🔥 Zone 내에서 가장 강한 열(column)을 peak로 저장
+    peak = Math.max(peak, colAvg);
   }
 
-  // 전체 zone 평균
-  const zoneAvg = lineStrength / zoneWidth;
-
-  // 🔥 자동 threshold (약한 선도 긁어옴)
-  return zoneAvg > 4.5;
+  // 🔥 아주 약한 라인도 잡을 수 있는 threshold
+  return peak > 1.6;
 };
 
   const Cdet = detectVertical(0, zoneW);
