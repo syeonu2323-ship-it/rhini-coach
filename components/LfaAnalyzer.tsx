@@ -21,10 +21,16 @@ type CropRect = { x0: number; y0: number; x1: number; y1: number };
 /* ============================================================
 📌 Crop 드래그 박스
 ============================================================ */
-function CropBox({ canvasRef, onCrop }) {
-  const [box, setBox] = useState(null);
+function CropBox({
+  canvasRef,
+  onCrop,
+}: {
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  onCrop: (r: CropRect) => void;
+}) {
+  const [box, setBox] = useState<CropRect | null>(null);
 
-  const handleMouseDown = (e) => {
+  const handleMouseDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
 
     const rect = canvasRef.current.getBoundingClientRect();
@@ -39,7 +45,7 @@ function CropBox({ canvasRef, onCrop }) {
     });
   };
 
-  const handleMouseMove = (e) => {
+  const handleMouseMove = (e: React.MouseEvent) => {
     if (!canvasRef.current || !box) return;
 
     const rect = canvasRef.current.getBoundingClientRect();
@@ -78,7 +84,6 @@ function CropBox({ canvasRef, onCrop }) {
     </div>
   );
 }
-
 
 /* ============================================================
 📌 3-zone Overlay (가로 3분할 C / MPO / ECP)
