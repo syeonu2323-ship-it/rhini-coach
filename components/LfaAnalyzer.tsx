@@ -1,94 +1,72 @@
 "use client";
 
-import React, {
-  useRef,
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-} from "react";
+import React, { useRef, useState, useEffect, useCallback } from "react";
 
-/* -------------------------------------------------------
-   타입
-------------------------------------------------------- */
+/* ============================================================
+   📌 타입 정의
+============================================================ */
 type Verdict = "Positive" | "Negative" | "Invalid";
 type Diagnosis = "none" | "allergic" | "bacterial" | "mixed";
 
-type AnalyzeResult = {
+type AnalyzeOut = {
   verdict: Verdict;
-  diagnosis: Diagnosis;
   detail: string;
+  diagnosis: Diagnosis;
   ecpPositive: boolean;
   mpoPositive: boolean;
 };
 
-/* -------------------------------------------------------
-   Crop UI 컴포넌트
-------------------------------------------------------- */
+/* ============================================================
+   📌 CropBox 컴포넌트 (드래그로 ROI 만드는 박스)
+============================================================ */
 function CropBox({
   canvasRef,
   onCrop,
 }: {
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  onCrop: (crop: { x: number; y: number; w: number; h: number }) => void;
-})
- {
+  canvasRef: React.RefObject<HTMLCanvasElement>;
+  onCrop: (rect: { x0: number; y0: number; x1: number; y1: number }) => void;
+}) {
   const [dragging, setDragging] = useState(false);
-  const [box, setBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const start = useRef<{ x: number; y: number } | null>(null);
+  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   const onDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    start.current = { x, y };
-    setBox({ x, y, w: 0, h: 0 });
+    const r = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
     setDragging(true);
+    setBox({ x0: x, y0: y, x1: x, y1: y });
   };
 
   const onMove = (e: React.MouseEvent) => {
-    if (!dragging || !start.current || !canvasRef.current) return;
-
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const w = x - start.current.x;
-    const h = y - start.current.y;
-
-    setBox({
-      x: start.current.x,
-      y: start.current.y,
-      w,
-      h,
-    });
+    if (!dragging || !canvasRef.current || !box) return;
+    const r = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
+    setBox({ ...box, x1: x, y1: y });
   };
 
   const onUp = () => {
     if (box) onCrop(box);
     setDragging(false);
-    start.current = null;
   };
 
   return (
     <div
+      className="absolute inset-0 z-20"
       onMouseDown={onDown}
       onMouseMove={onMove}
       onMouseUp={onUp}
-      className="absolute inset-0 cursor-crosshair"
+      style={{ cursor: "crosshair" }}
     >
       {box && (
         <div
+          className="absolute border-2 border-blue-400 bg-blue-200/20"
           style={{
-            position: "absolute",
-            border: "2px solid #4F46E5",
-            left: box.x,
-            top: box.y,
-            width: box.w,
-            height: box.h,
-            background: "rgba(79,70,229,0.1)",
+            left: Math.min(box.x0, box.x1),
+            top: Math.min(box.y0, box.y1),
+            width: Math.abs(box.x1 - box.x0),
+            height: Math.abs(box.y1 - box.y0),
           }}
         />
       )}
@@ -96,117 +74,176 @@ function CropBox({
   );
 }
 
-/* -------------------------------------------------------
-   세로 라인(가로형 키트의 세로 peak) 검출
-------------------------------------------------------- */
-function detectLineInSlice(
-  img: ImageData,
-  x0: number,
-  x1: number
-): boolean {
-  const { width, height, data } = img;
+/* ============================================================
+   📌 이미지 intensity 분석 (3등분)
+============================================================ */
+function analyzeCrop(
+  canvas: HTMLCanvasElement,
+  rect: { x0: number; y0: number; x1: number; y1: number }
+): AnalyzeOut {
+  const ctx = canvas.getContext("2d")!;
+  const x0 = Math.min(rect.x0, rect.x1);
+  const y0 = Math.min(rect.y0, rect.y1);
+  const w = Math.abs(rect.x1 - rect.x0);
+  const h = Math.abs(rect.y1 - rect.y0);
 
-  const colSum = new Array(height).fill(0);
+  const img = ctx.getImageData(x0, y0, w, h);
+  const d = img.data;
 
-  for (let y = 0; y < height; y++) {
-    let s = 0;
-    for (let x = x0; x < x1; x++) {
-      const idx = (y * width + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      const sum = r + g + b || 1;
-      const red = r / sum - (g / sum + b / sum) * 0.4;
-      if (red > 0.1) s += red;
+  // 🎯 3등분
+  const c1 = 0; // C
+  const c2 = Math.floor(w / 3); // M
+  const c3 = Math.floor((w * 2) / 3); // E
+
+  function avgZone(xStart: number, xEnd: number) {
+    let sum = 0;
+    let count = 0;
+
+    for (let x = xStart; x < xEnd; x++) {
+      for (let y = 0; y < h; y++) {
+        const i = (y * w + x) * 4;
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+
+        const chroma = r - (g + b) * 0.3;
+        sum += Math.max(0, chroma);
+        count++;
+      }
     }
-    colSum[y] = s;
+    return sum / count;
   }
 
-  const threshold = Math.max(...colSum) * 0.45;
-  return colSum.some((v) => v > threshold);
-}
+  const C = avgZone(c1, c2);
+  const M = avgZone(c2, c3);
+  const E = avgZone(c3, w);
 
-/* -------------------------------------------------------
-   Crop → 3등분 → C/M/E 판독
-------------------------------------------------------- */
-function analyzeCrop(canvas: HTMLCanvasElement, crop: any): AnalyzeResult {
-  const ctx = canvas.getContext("2d")!;
-  const { x, y, w, h } = crop;
-
-  const img = ctx.getImageData(x, y, w, h);
-
-  // 3등분
-  const w1 = Math.floor(w / 3);
-  const cStart = 0;
-  const mStart = w1;
-  const eStart = w1 * 2;
-
-  const C = detectLineInSlice(img, cStart, cStart + w1);
-  const M = detectLineInSlice(img, mStart, mStart + w1);
-  const E = detectLineInSlice(img, eStart, eStart + w1);
-
-  if (!C) {
+  // ⚠ C(컨트롤)이 일정 threshold 이하 → 무효
+  if (C < 5) {
     return {
       verdict: "Invalid",
-      diagnosis: "none",
       detail: "Control line not detected",
+      diagnosis: "none",
       ecpPositive: false,
       mpoPositive: false,
     };
   }
 
-  let diagnosis: Diagnosis = "none";
-  if (M && E) diagnosis = "mixed";
-  else if (M) diagnosis = "bacterial";
-  else if (E) diagnosis = "allergic";
+  const mpoPositive = M > 6;
+  const ecpPositive = E > 6;
+
+  let verdict: Verdict = mpoPositive || ecpPositive ? "Positive" : "Negative";
+
+  const diagnosis: Diagnosis =
+    mpoPositive && ecpPositive
+      ? "mixed"
+      : mpoPositive
+      ? "bacterial"
+      : ecpPositive
+      ? "allergic"
+      : "none";
 
   return {
-    verdict: M || E ? "Positive" : "Negative",
+    verdict,
+    detail: `C=${C.toFixed(1)} | M=${M.toFixed(1)} | E=${E.toFixed(1)}`,
     diagnosis,
-    detail: `C=${C} | MPO=${M} | ECP=${E}`,
-    ecpPositive: E,
-    mpoPositive: M,
+    mpoPositive,
+    ecpPositive,
   };
 }
 
-/* -------------------------------------------------------
-   메인 컴포넌트
-------------------------------------------------------- */
+/* ============================================================
+   📌 증상 분석 + 약 추천
+============================================================ */
+function analyzeSymptoms(text: string) {
+  const t = text.toLowerCase();
+
+  const hit = (r: RegExp) => r.test(t);
+
+  let otc = new Set<string>();
+  let dept = new Set<string>();
+  let flags = new Set<string>();
+
+  if (hit(/콧물|코막힘|비염|재채기/)) {
+    otc.add("항히스타민(세티리진/로라타딘)");
+    dept.add("이비인후과");
+  }
+  if (hit(/기침|목아픔/)) dept.add("호흡기내과");
+  if (hit(/열|오한/)) otc.add("해열진통제");
+
+  if (hit(/호흡곤란|청색증/)) flags.add("⚠ 응급 가능성 → 즉시 진료");
+
+  return {
+    otc: [...otc],
+    dept: [...dept],
+    flags: [...flags],
+  };
+}
+
+/* ============================================================
+   📌 위치 기반 Finder
+============================================================ */
+function NearbyFinder() {
+  const search = (q: string) => {
+    const naver = `https://map.naver.com/v5/search/${encodeURIComponent(q)}`;
+    const kakao = `https://map.kakao.com/?q=${encodeURIComponent(q)}`;
+    window.open(naver, "_blank");
+    window.open(kakao, "_blank");
+  };
+
+  return (
+    <div className="mt-4 p-4 border rounded-xl bg-emerald-50 text-sm">
+      <div className="font-semibold mb-2">📍 근처 병원/약국 찾기</div>
+      <button
+        onClick={() => search("약국")}
+        className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg mr-2"
+      >
+        약국
+      </button>
+      <button
+        onClick={() => search("이비인후과")}
+        className="px-3 py-1.5 bg-white border rounded-lg"
+      >
+        이비인후과
+      </button>
+    </div>
+  );
+}
+
+/* ============================================================
+   📌 메인 컴포넌트
+============================================================ */
 export default function LfaAnalyzer() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
   const [cropBox, setCropBox] = useState<any>(null);
-  const [result, setResult] = useState<AnalyzeResult | null>(null);
+  const [result, setResult] = useState<AnalyzeOut | null>(null);
+  const [symptom, setSymptom] = useState("");
 
-  // 이미지 로드 → Canvas 그리기
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  /* 🔄 이미지 로드 → 캔버스에 반영 */
   useEffect(() => {
     if (!imageUrl || !canvasRef.current) return;
 
     const img = new Image();
     img.src = imageUrl;
     img.onload = () => {
-      const canvas = canvasRef.current!;
-      const ctx = canvas.getContext("2d")!;
+      imgRef.current = img;
+      const cvs = canvasRef.current;
+      const ctx = cvs.getContext("2d")!;
 
-      const sw = img.naturalWidth;
-      const sh = img.naturalHeight;
-      const scale = Math.min(1, 1600 / Math.max(sw, sh));
+      const maxW = 1200;
+      const scale = Math.min(1, maxW / img.width);
 
-      const dw = Math.round(sw * scale);
-      const dh = Math.round(sh * scale);
+      cvs.width = img.width * scale;
+      cvs.height = img.height * scale;
 
-      canvas.width = dw;
-      canvas.height = dh;
-
-      ctx.drawImage(img, 0, 0, dw, dh);
+      ctx.drawImage(img, 0, 0, cvs.width, cvs.height);
     };
   }, [imageUrl]);
 
-  const handleCrop = (box: any) => {
-    setCropBox(box);
-  };
-
+  /* 🔍 분석 실행 */
   const analyze = () => {
     if (!canvasRef.current || !cropBox) return;
     const out = analyzeCrop(canvasRef.current, cropBox);
@@ -214,10 +251,9 @@ export default function LfaAnalyzer() {
   };
 
   return (
-    <div className="w-full max-w-4xl mx-auto p-4 relative">
-      <h1 className="text-xl font-semibold mb-4">📷 LFA QuickCheck — Crop Version</h1>
+    <div className="max-w-4xl mx-auto p-4">
+      <h1 className="text-xl font-semibold mb-4">📸 LFA QuickCheck — Crop Version (3-Line)</h1>
 
-      {/* 업로드 */}
       <input
         type="file"
         accept="image/*"
@@ -228,17 +264,12 @@ export default function LfaAnalyzer() {
         }}
       />
 
-      {/* Canvas 영역 */}
+      {/* Canvas + Crop */}
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
-       {imageUrl && (
-  <CropBox canvasRef={canvasRef} onCrop={handleCrop} />
-)}
-
-
+        {imageUrl && <CropBox canvasRef={canvasRef} onCrop={setCropBox} />}
       </div>
 
-      {/* 분석 */}
       <button
         onClick={analyze}
         disabled={!cropBox}
@@ -250,178 +281,57 @@ export default function LfaAnalyzer() {
       {/* 결과 */}
       {result && (
         <div className="mt-4 p-4 border rounded-xl bg-white">
-          <h3 className="font-semibold mb-2">결과</h3>
-          <p>{result.detail}</p>
-          <p>진단: {result.diagnosis}</p>
+          <h3 className="font-semibold text-lg mb-2">결과</h3>
+          <p className="text-sm mb-2">{result.detail}</p>
+
+          <div className="flex gap-2">
+            <span className={`px-2 py-1 rounded-lg text-sm ${result.mpoPositive ? "bg-sky-100 text-sky-700" : "bg-gray-200 text-gray-700"}`}>
+              MPO: {result.mpoPositive ? "양성" : "음성"}
+            </span>
+            <span className={`px-2 py-1 rounded-lg text-sm ${result.ecpPositive ? "bg-amber-100 text-amber-700" : "bg-gray-200 text-gray-700"}`}>
+              ECP: {result.ecpPositive ? "양성" : "음성"}
+            </span>
+          </div>
+
+          <p className="mt-3 text-sm">
+            🧩 진단:{" "}
+            {result.diagnosis === "allergic"
+              ? "🌼 알레르기성 비염"
+              : result.diagnosis === "bacterial"
+              ? "🦠 세균성 비염"
+              : result.diagnosis === "mixed"
+              ? "🌼🦠 혼합형"
+              : "해당 없음"}
+          </p>
         </div>
       )}
-    </div>
-  );
-}
-function RhinitisAdvice({ diagnosis }: { diagnosis: Diagnosis }) {
-  if (diagnosis === "none") return null;
 
-  const info =
-    diagnosis === "allergic"
-      ? {
-          title: "🌼 알레르기성 비염",
-          desc: "ECP 양성 패턴 → 면역 알레르기 반응이 의심됩니다.",
-        }
-      : diagnosis === "bacterial"
-      ? {
-          title: "🦠 세균성 비염",
-          desc: "MPO 양성 패턴 → 세균 감염 가능성이 높습니다.",
-        }
-      : {
-          title: "🌼🦠 혼합형 비염",
-          desc: "ECP + MPO 모두 양성 → 복합 감염 가능성이 있습니다.",
-        };
-
-  return (
-    <div className="mt-4 p-4 border bg-amber-50 border-amber-300 rounded-xl">
-      <div className="font-semibold mb-1">{info.title}</div>
-      <p className="text-sm text-amber-800">{info.desc}</p>
-    </div>
-  );
-}
-function analyzeSymptoms(text: string) {
-  const t = text.toLowerCase();
-  const hit = (r: RegExp) => r.test(t);
-
-  let otc: string[] = [];
-  let dept: string[] = [];
-  let flags: string[] = [];
-
-  if (hit(/비염|콧물|코막힘|재채기|가려움/)) {
-  otc.push("항히스타민(세티리진/로라타딘)");
-  otc.push("비충혈 제거제(단기)");
-  dept.push("이비인후과");
-}
-
-if (hit(/열|발열|오한|근육통/)) {
-  otc.push("해열진통제(아세트아미노펜)");
-  dept.push("내과");
-}
-
-if (hit(/기침|가래|호흡곤란/)) {
-  otc.push("기침 억제제·거담제");
-  dept.push("호흡기내과");
-}
-
-if (hit(/호흡곤란|청색증|의식저하/)) {
-  flags.push("⚠️ 응급 증상 가능. 즉시 진료 필요");
-}
-
-
-  return {
-    otc: [...new Set(otc)],
-    dept: [...new Set(dept)],
-    flags: [...new Set(flags)],
-  };
-}
-
-function SymptomLogger({ defaultVerdict }: { defaultVerdict?: Verdict }) {
-  const [text, setText] = useState("");
-  const [out, setOut] = useState<ReturnType<typeof analyzeSymptoms> | null>(
-    null
-  );
-
-  return (
-    <div className="mt-6 p-4 border rounded-xl bg-rose-50">
-      <h2 className="font-semibold text-rose-700 mb-1">📝 증상 기록 및 분석</h2>
-      <textarea
-        rows={3}
-        className="w-full border p-2 rounded-md text-sm mb-2"
-        placeholder="예: 콧물, 재채기, 목아픔..."
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
-
-      <button
-        className="px-3 py-1.5 bg-rose-600 text-white rounded-lg text-sm"
-        onClick={() => setOut(analyzeSymptoms(text))}
-      >
-        분석하기
-      </button>
-
-      {out && (
-        <div className="mt-3 text-sm">
-          <div className="font-medium">💊 추천 일반의약품</div>
-          {out.otc.length ? (
-            <ul className="list-disc ml-5">{out.otc.map((x) => <li key={x}>{x}</li>)}</ul>
-          ) : (
-            "없음"
-          )}
-
-          <div className="font-medium mt-3">🏥 권장 진료과</div>
-          {out.dept.length ? (
-            <ul className="list-disc ml-5">{out.dept.map((x) => <li key={x}>{x}</li>)}</ul>
-          ) : (
-            "없음"
-          )}
-
-          {out.flags.length > 0 && (
-            <div className="mt-3 p-2 border rounded-lg text-red-700 bg-red-50 text-xs">
-              {out.flags.join(" / ")}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-function useGeo() {
-  const [lat, setLat] = useState<number | null>(null);
-  const [lng, setLng] = useState<number | null>(null);
-
-  const request = () => {
-    navigator.geolocation.getCurrentPosition((p) => {
-      setLat(p.coords.latitude);
-      setLng(p.coords.longitude);
-    });
-  };
-
-  return { lat, lng, request };
-}
-
-function NearbyFinder() {
-  const { lat, lng, request } = useGeo();
-
-  const openMap = (q: string) => {
-    const query = encodeURIComponent(q);
-    const naver = `https://map.naver.com/v5/search/${query}`;
-    window.open(naver, "_blank");
-  };
-
-  return (
-    <div className="mt-6 p-4 border rounded-xl bg-emerald-50">
-      <div className="flex gap-2 items-center mb-2">
-        <span className="font-semibold">📍 근처 약국·병원 찾기</span>
-        <button className="px-2 py-1 border rounded-md bg-white text-xs" onClick={request}>
-          내 위치
+      {/* 증상 기록 */}
+      <div className="mt-4 p-4 border rounded-xl bg-rose-50 text-sm">
+        <div className="font-semibold mb-1">📝 증상 기록</div>
+        <textarea
+          className="w-full border rounded-md p-2 text-sm"
+          rows={3}
+          value={symptom}
+          onChange={(e) => setSymptom(e.target.value)}
+          placeholder="예: 콧물, 재채기, 목아픔…"
+        />
+        <button
+          className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
+          onClick={() => {
+            const out = analyzeSymptoms(symptom);
+            alert(
+              `💊 약 추천: ${out.otc.join(", ") || "없음"}\n🏥 진료과: ${out.dept.join(
+                ", "
+              ) || "없음"}\n${out.flags.join(", ")}`
+            );
+          }}
+        >
+          증상 분석
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-2 text-sm">
-        <button
-          onClick={() => openMap("약국")}
-          className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg"
-        >
-          약국
-        </button>
-        <button
-          onClick={() => openMap("이비인후과")}
-          className="px-3 py-1.5 bg-white border rounded-lg"
-        >
-          이비인후과
-        </button>
-        <button
-          onClick={() => openMap("호흡기내과")}
-          className="px-3 py-1.5 bg-white border rounded-lg"
-        >
-          호흡기내과
-        </button>
-      </div>
+      <NearbyFinder />
     </div>
   );
 }
