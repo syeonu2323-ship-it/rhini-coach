@@ -307,7 +307,7 @@ export default function LfaAnalyzer() {
       <div className="relative border rounded-xl overflow-hidden">
         <canvas ref={canvasRef} className="w-full" />
         {imageUrl && <CropBox canvasRef={canvasRef} onCrop={setCropBox} />}
-        {cropBox && <CropZoneOverlay rect={cropBox} />}
+      
       </div>
 
       {/* 판독 버튼 */}
