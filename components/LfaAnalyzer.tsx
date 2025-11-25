@@ -151,33 +151,57 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
   const d = img.data;
 
   // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
- const detectVerticalPeak = (xStart: number, xEnd: number) => {
-  let peak = 0;
+const detectVertical = (xStart: number, xEnd: number) => {
+  // zone width
+  const zoneW = xEnd - xStart;
 
-  for (let col = xStart; col < xEnd; col++) {
+  // 🎯 중앙 20% 범위만 스캔 (양쪽 노이즈 제외)
+  const cStart = Math.floor(xStart + zoneW * 0.4);
+  const cEnd   = Math.floor(xStart + zoneW * 0.6);
+
+  let peaks: number[] = [];
+
+  // 중앙 영역만 탐색
+  for (let col = cStart; col < cEnd; col++) {
     let sum = 0;
+
     for (let row = 0; row < h; row++) {
       const i = (row * w + col) * 4;
       const r = d[i], g = d[i + 1], b = d[i + 2];
+
+      // 빨강 성분 강조 (LFA 줄 특징)
       const redBoost = r - (g + b) * 0.5;
       sum += Math.max(0, redBoost);
     }
-    const avg = sum / h;
-    peak = Math.max(peak, avg);
+
+    peaks.push(sum / h); // column 평균
   }
 
-  return peak;  // ✔ 이제 true/false 판단하지 않음
+  // 🔍 중앙 부분에서 가장 강한 column만 검출
+  let peak = Math.max(...peaks);
+
+  // 🔥 정확도 높이기 위해 peak 주변 3픽셀도 같이 검사
+  const peakIndex = peaks.indexOf(peak);
+
+  let refinedPeak = 0;
+  for (let i = peakIndex - 2; i <= peakIndex + 2; i++) {
+    if (i < 0 || i >= peaks.length) continue;
+    refinedPeak = Math.max(refinedPeak, peaks[i]);
+  }
+
+  return refinedPeak; // 숫자로 반환
 };
 
 
-  const Cpeak = detectVerticalPeak(0, zoneW);
-const Mpeak = detectVerticalPeak(zoneW, zoneW * 2);
-const Epeak = detectVerticalPeak(zoneW * 2, zoneW * 3);
 
-// 🔥 각 칸별로 다른 threshold 적용!
-const Cdet = Cpeak > 2.0;
-const Mdet = Mpeak > 1.5;
-const Edet = Epeak > 1.5;
+const Cpeak = detectVertical(0, zoneW);
+const Mpeak = detectVertical(zoneW, zoneW * 2);
+const Epeak = detectVertical(zoneW * 2, zoneW * 3);
+
+// 🎯 D 방식 최적 threshold
+const Cdet = Cpeak > 2.0;   // 컨트롤 라인은 항상 강함
+const Mdet = Mpeak > 1.3;   // 테스트 라인은 약함 → threshold 낮게
+const Edet = Epeak > 1.3;
 
   if (!Cdet) {
     return {
