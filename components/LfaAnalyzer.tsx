@@ -346,11 +346,12 @@ export default function LfaAnalyzer() {
   return (
     <div className="max-w-4xl mx-auto p-4">
     <h1
-  onClick={resetAll}
+  onClick={() => window.location.reload()}
   className="text-lg font-semibold mb-4 cursor-pointer select-none hover:text-indigo-600 transition"
 >
   📸 LFA QuickCheck — Crop + 3-Zone
 </h1>
+
 
 
       <input
