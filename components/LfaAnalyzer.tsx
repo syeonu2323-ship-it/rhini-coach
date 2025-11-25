@@ -310,6 +310,14 @@ export default function LfaAnalyzer() {
   const [result, setResult] = useState<AnalyzeOut | null>(null);
   const [symptom, setSymptom] = useState("");
 
+    const resetAll = () => {
+    setImageUrl(null);
+    setCropBox(null);
+    setResult(null);
+    setSymptom("");
+  };
+
+
   /* 이미지 로드 */
   useEffect(() => {
     if (!imageUrl || !canvasRef.current) return;
@@ -337,7 +345,13 @@ export default function LfaAnalyzer() {
 
   return (
     <div className="max-w-4xl mx-auto p-4">
-      <h1 className="text-lg font-semibold mb-4">📸 LFA QuickCheck — Crop + 3-Zone</h1>
+    <h1
+  onClick={resetAll}
+  className="text-lg font-semibold mb-4 cursor-pointer select-none hover:text-indigo-600 transition"
+>
+  📸 LFA QuickCheck — Crop + 3-Zone
+</h1>
+
 
       <input
         type="file"
