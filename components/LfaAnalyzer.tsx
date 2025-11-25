@@ -19,49 +19,52 @@ type AnalyzeOut = {
 /* ============================================================
    📌 CropBox 컴포넌트 (드래그로 ROI 만드는 박스)
 ============================================================ */
+type CropRect = { x0: number; y0: number; x1: number; y1: number };
+
 function CropBox({
   canvasRef,
   onCrop,
 }: {
-  canvasRef: React.RefObject<HTMLCanvasElement>;
-  onCrop: (rect: { x0: number; y0: number; x1: number; y1: number }) => void;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  onCrop: (r: CropRect) => void;
 }) {
-  const [dragging, setDragging] = useState(false);
-  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [box, setBox] = useState<CropRect | null>(null);
 
-  const onDown = (e: React.MouseEvent) => {
+  const handleMouseDown = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
-    const r = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - r.left;
-    const y = e.clientY - r.top;
-    setDragging(true);
-    setBox({ x0: x, y0: y, x1: x, y1: y });
+    const rect = canvasRef.current.getBoundingClientRect();
+    setBox({
+      x0: e.clientX - rect.left,
+      y0: e.clientY - rect.top,
+      x1: e.clientX - rect.left,
+      y1: e.clientY - rect.top,
+    });
   };
 
-  const onMove = (e: React.MouseEvent) => {
-    if (!dragging || !canvasRef.current || !box) return;
-    const r = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - r.left;
-    const y = e.clientY - r.top;
-    setBox({ ...box, x1: x, y1: y });
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!canvasRef.current || !box) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    setBox({
+      ...box,
+      x1: e.clientX - rect.left,
+      y1: e.clientY - rect.top,
+    });
   };
 
-  const onUp = () => {
+  const handleMouseUp = () => {
     if (box) onCrop(box);
-    setDragging(false);
   };
 
   return (
     <div
-      className="absolute inset-0 z-20"
-      onMouseDown={onDown}
-      onMouseMove={onMove}
-      onMouseUp={onUp}
-      style={{ cursor: "crosshair" }}
+      className="absolute inset-0 cursor-crosshair"
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
     >
       {box && (
         <div
-          className="absolute border-2 border-blue-400 bg-blue-200/20"
+          className="absolute border-2 border-red-500"
           style={{
             left: Math.min(box.x0, box.x1),
             top: Math.min(box.y0, box.y1),
