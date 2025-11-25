@@ -141,6 +141,9 @@ function ZoneGuide({
 /* ============================================================
    📌 Hue 기반 판독
 ============================================================ */
+/* ============================================================
+   📌 개선 버전 — 자주색(Magenta/Red) 기반 판독
+============================================================ */
 function analyzeCrop(
   canvas: HTMLCanvasElement,
   rect: CropRect
@@ -156,82 +159,82 @@ function analyzeCrop(
 
   const zoneW = Math.floor(w / 3);
 
-  const detectHueZone = (sx: number, ex: number) => {
-    let red = 0,
-      tot = 0;
+  /* 🔥 자주색(Magenta 계열)을 감지하는 함수 */
+  const detectPurpleZone = (sx: number, ex: number) => {
+    let purple = 0, tot = 0;
 
     for (let x = sx; x < ex; x++) {
       for (let y = 0; y < h; y++) {
         const i = (y * w + x) * 4;
-        const r = d[i] / 255,
-          g = d[i + 1] / 255,
-          b = d[i + 2] / 255;
+        const r = d[i], g = d[i + 1], b = d[i + 2];
 
-        const max = Math.max(r, g, b);
-        const min = Math.min(r, g, b);
+        // --- RGB intensity 조건 ---
+        const condIntensity =
+          r > 80 && b > 70 && g < 90 &&
+          r > g && b > g;
+
+        // --- Hue 조건 (Red + Magenta) ---
+        const R = r / 255, G = g / 255, B = b / 255;
+        const max = Math.max(R, G, B);
+        const min = Math.min(R, G, B);
         const delta = max - min;
 
         let H = 0;
         if (delta !== 0) {
-          if (max === r) H = ((g - b) / delta) % 6;
-          else if (max === g) H = (b - r) / delta + 2;
-          else H = (r - g) / delta + 4;
+          if (max === R) H = ((G - B) / delta) % 6;
+          else if (max === G) H = (B - R) / delta + 2;
+          else H = (R - G) / delta + 4;
         }
         H *= 60;
         if (H < 0) H += 360;
 
-        const isRed = H <= 20 || H >= 340;
-        if (isRed) red++;
+        const isPurpleHue =
+          (H >= 280 && H <= 340) || // Magenta
+          (H <= 20 || H >= 350);    // Red
+
+        if (condIntensity && isPurpleHue) purple++;
         tot++;
       }
     }
-
-    return red / tot;
+    return purple / tot;
   };
 
-  const C = detectHueZone(0, zoneW);
-  const M = detectHueZone(zoneW, zoneW * 2);
-  const E = detectHueZone(zoneW * 2, zoneW * 3);
+  const C = detectPurpleZone(0, zoneW);
+  const M = detectPurpleZone(zoneW, zoneW * 2);
+  const E = detectPurpleZone(zoneW * 2, zoneW * 3);
 
-  const Cdet = C > 0.06;
-  const Mdet = M > 0.015;
-  const Edet = E > 0.015;
+  const Cdet = C > 0.02;
+  const Mdet = M > 0.01;
+  const Edet = E > 0.01;
 
   if (!Cdet) {
     return {
       verdict: "Invalid",
-      detail: `C=${C.toFixed(4)} / M=${M.toFixed(4)} / E=${E.toFixed(4)}`,
+      detail: `C=${(C*100).toFixed(2)}% / M=${(M*100).toFixed(2)}% / E=${(E*100).toFixed(2)}%`,
       diagnosis: "none",
       mpoPositive: false,
       ecpPositive: false,
     };
   }
 
-  const mpoPositive = Mdet;
-  const ecpPositive = Edet;
+  const mpo = Mdet;
+  const ecp = Edet;
 
-  let verdict: Verdict =
-    mpoPositive || ecpPositive ? "Positive" : "Negative";
-
-  const diagnosis: Diagnosis =
-    mpoPositive && ecpPositive
-      ? "mixed"
-      : mpoPositive
-      ? "bacterial"
-      : ecpPositive
-      ? "allergic"
-      : "none";
+  let verdict: Verdict = mpo || ecp ? "Positive" : "Negative";
+  let dx: Diagnosis =
+    mpo && ecp ? "mixed" :
+    mpo ? "bacterial" :
+    ecp ? "allergic" : "none";
 
   return {
     verdict,
-    detail: `Hue% → C=${(C * 100).toFixed(
-      2
-    )}% | MPO=${(M * 100).toFixed(2)}% | ECP=${(E * 100).toFixed(2)}%`,
-    diagnosis,
-    mpoPositive,
-    ecpPositive,
+    detail: `Purple% → C=${(C*100).toFixed(2)}% | MPO=${(M*100).toFixed(2)}% | ECP=${(E*100).toFixed(2)}%`,
+    diagnosis: dx,
+    mpoPositive: mpo,
+    ecpPositive: ecp,
   };
 }
+
 
 /* ============================================================
    📌 증상 분석
