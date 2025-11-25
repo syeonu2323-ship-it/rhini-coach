@@ -231,7 +231,11 @@ export default function LfaAnalyzer() {
     img.onload = () => {
       imgRef.current = img;
       const cvs = canvasRef.current;
-      const ctx = cvs.getContext("2d")!;
+if (!cvs) return;   // ← 이 한 줄이면 완벽 해결
+
+const ctx = cvs.getContext("2d");
+if (!ctx) return;
+
 
       const maxW = 1200;
       const scale = Math.min(1, maxW / img.width);
