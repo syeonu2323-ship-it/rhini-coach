@@ -144,6 +144,9 @@ function ZoneGuide({
 /* ============================================================
    📌 개선 버전 — 자주색(Magenta/Red) 기반 판독
 ============================================================ */
+/* ============================================================
+   📌 Super Sensitive — 자주/빨강/갈자주 모두 감지하는 버전
+============================================================ */
 function analyzeCrop(
   canvas: HTMLCanvasElement,
   rect: CropRect
@@ -159,21 +162,15 @@ function analyzeCrop(
 
   const zoneW = Math.floor(w / 3);
 
-  /* 🔥 자주색(Magenta 계열)을 감지하는 함수 */
-  const detectPurpleZone = (sx: number, ex: number) => {
-    let purple = 0, tot = 0;
+  /* 🔥 극민감 자주+붉자주+갈자주 감지 함수 */
+  const detectLineZone = (sx: number, ex: number) => {
+    let hit = 0, tot = 0;
 
     for (let x = sx; x < ex; x++) {
       for (let y = 0; y < h; y++) {
         const i = (y * w + x) * 4;
         const r = d[i], g = d[i + 1], b = d[i + 2];
 
-        // --- RGB intensity 조건 ---
-        const condIntensity =
-          r > 80 && b > 70 && g < 90 &&
-          r > g && b > g;
-
-        // --- Hue 조건 (Red + Magenta) ---
         const R = r / 255, G = g / 255, B = b / 255;
         const max = Math.max(R, G, B);
         const min = Math.min(R, G, B);
@@ -188,29 +185,42 @@ function analyzeCrop(
         H *= 60;
         if (H < 0) H += 360;
 
-        const isPurpleHue =
-          (H >= 280 && H <= 340) || // Magenta
-          (H <= 20 || H >= 350);    // Red
+        /* 🎯 Hue 기준을 대폭 확장
+           - 0°~50° : 빨강~주황(갈색)
+           - 280°~360° : 보라~자주색 
+        */
+        const hueHit =
+          (H >= 0 && H <= 50) || 
+          (H >= 280 && H <= 360);
 
-        if (condIntensity && isPurpleHue) purple++;
+        /* 🎯 Intensity 기준 완화
+           - 붉은빛 또는 자주빛만 있어도 인정
+        */
+        const intensityHit =
+          (r > g + 20 && r > b + 10) ||   // 붉은 라인
+          (r > 70 && b > 70) ||           // 자주색
+          (r > 90 && g > 60 && b > 40);   // 갈색 섞인 자주
+
+        if (hueHit && intensityHit) hit++;
         tot++;
       }
     }
-    return purple / tot;
+    return hit / tot;
   };
 
-  const C = detectPurpleZone(0, zoneW);
-  const M = detectPurpleZone(zoneW, zoneW * 2);
-  const E = detectPurpleZone(zoneW * 2, zoneW * 3);
+  const C = detectLineZone(0, zoneW);
+  const M = detectLineZone(zoneW, zoneW * 2);
+  const E = detectLineZone(zoneW * 2, zoneW * 3);
 
-  const Cdet = C > 0.02;
-  const Mdet = M > 0.01;
-  const Edet = E > 0.01;
+  /* 🎯 임계값을 아주 낮게 설정 (극민감) */
+  const Cdet = C > 0.003; 
+  const Mdet = M > 0.0025;
+  const Edet = E > 0.0025;
 
   if (!Cdet) {
     return {
       verdict: "Invalid",
-      detail: `C=${(C*100).toFixed(2)}% / M=${(M*100).toFixed(2)}% / E=${(E*100).toFixed(2)}%`,
+      detail: `C=${(C*100).toFixed(3)}% / M=${(M*100).toFixed(3)}% / E=${(E*100).toFixed(3)}%`,
       diagnosis: "none",
       mpoPositive: false,
       ecpPositive: false,
@@ -220,70 +230,20 @@ function analyzeCrop(
   const mpo = Mdet;
   const ecp = Edet;
 
-  let verdict: Verdict = mpo || ecp ? "Positive" : "Negative";
-  let dx: Diagnosis =
+  const verdict: Verdict = mpo || ecp ? "Positive" : "Negative";
+  const dx: Diagnosis =
     mpo && ecp ? "mixed" :
     mpo ? "bacterial" :
-    ecp ? "allergic" : "none";
+    ecp ? "allergic" :
+    "none";
 
   return {
     verdict,
-    detail: `Purple% → C=${(C*100).toFixed(2)}% | MPO=${(M*100).toFixed(2)}% | ECP=${(E*100).toFixed(2)}%`,
+    detail: `Line% → C=${(C*100).toFixed(3)}% | MPO=${(M*100).toFixed(3)}% | ECP=${(E*100).toFixed(3)}%`,
     diagnosis: dx,
     mpoPositive: mpo,
     ecpPositive: ecp,
   };
-}
-
-
-/* ============================================================
-   📌 증상 분석
-============================================================ */
-function analyzeSymptoms(text: string) {
-  const t = text.toLowerCase();
-  const hit = (r: RegExp) => r.test(t);
-
-  const otc = new Set<string>();
-  const dept = new Set<string>();
-  const flags = new Set<string>();
-
-  if (hit(/콧물|코막힘|비염|재채기/)) {
-    otc.add("항히스타민제(세티리진/로라타딘)");
-    dept.add("이비인후과");
-  }
-  if (hit(/기침|목아픔/)) dept.add("호흡기내과");
-  if (hit(/열|오한/)) otc.add("해열진통제");
-  if (hit(/호흡곤란|청색증/)) flags.add("⚠ 즉시 응급진료!");
-
-  return { otc: [...otc], dept: [...dept], flags: [...flags] };
-}
-
-/* ============================================================
-   📌 근처 찾기
-============================================================ */
-function NearbyFinder() {
-  const go = (q: string) =>
-    window.open(
-      `https://map.naver.com/v5/search/${encodeURIComponent(q)}`
-    );
-
-  return (
-    <div className="mt-4 p-3 bg-emerald-50 border rounded-xl text-sm">
-      <div className="font-semibold mb-1">📍 근처 병원/약국 찾기</div>
-      <button
-        onClick={() => go("약국")}
-        className="px-3 py-1 bg-emerald-600 text-white rounded-lg mr-2"
-      >
-        약국
-      </button>
-      <button
-        onClick={() => go("이비인후과")}
-        className="px-3 py-1 bg-white border rounded-lg"
-      >
-        이비인후과
-      </button>
-    </div>
-  );
 }
 
 /* ============================================================
