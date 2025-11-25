@@ -311,6 +311,8 @@ export default function LfaAnalyzer() {
   const [cropBox, setCropBox] = useState<CropRect | null>(null);
   const [result, setResult] = useState<AnalyzeOut | null>(null);
   const [symptom, setSymptom] = useState("");
+  const [otherSymptom, setOtherSymptom] = useState("");
+
 
     const router = useRouter();
 
@@ -459,6 +461,70 @@ export default function LfaAnalyzer() {
           </p>
         </div>
       )}
+{/* 🔥 증상 선택 (버튼 + 기타 입력) */}
+<div className="p-4 bg-rose-50 border rounded-xl text-sm mb-4">
+  <div className="font-semibold mb-2">📝 현재 증상 선택</div>
+
+  <div className="flex flex-wrap gap-2">
+    {[
+      "콧물",
+      "코막힘",
+      "재채기",
+      "기침",
+      "목아픔",
+      "열",
+    ].map((sym) => (
+      <button
+        key={sym}
+        className={`px-3 py-1 rounded-lg border ${
+          symptom.includes(sym)
+            ? "bg-rose-600 text-white border-rose-600"
+            : "bg-white"
+        }`}
+        onClick={() => {
+          if (symptom.includes(sym)) {
+            setSymptom(symptom.replace(sym, ""));
+          } else {
+            setSymptom(symptom + " " + sym);
+          }
+        }}
+      >
+        {sym}
+      </button>
+    ))}
+
+    {/* ⭐ 기타 버튼 */}
+    <button
+      className={`px-3 py-1 rounded-lg border ${
+        symptom.includes("기타")
+          ? "bg-rose-600 text-white border-rose-600"
+          : "bg-white"
+      }`}
+      onClick={() => {
+        if (symptom.includes("기타")) {
+          setSymptom(symptom.replace("기타", ""));
+        } else {
+          setSymptom(symptom + " 기타");
+        }
+      }}
+    >
+      기타
+    </button>
+  </div>
+
+  {/* ⭐ 기타 입력창 */}
+  {symptom.includes("기타") && (
+    <div className="mt-3">
+      <input
+        type="text"
+        placeholder="기타 증상을 입력하세요 (예: 두통)"
+        className="w-full border rounded-md p-2 text-sm"
+        value={otherSymptom}
+        onChange={(e) => setOtherSymptom(e.target.value)}
+      />
+    </div>
+  )}
+</div>
 
       {/* 증상 기록 */}
       <div className="mt-4 p-4 bg-rose-50 border rounded-xl text-sm">
@@ -475,7 +541,7 @@ export default function LfaAnalyzer() {
         <button
           className="mt-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg"
           onClick={() => {
-            const out = analyzeSymptoms(symptom);
+            const out = analyzeSymptoms(symptom + " " + otherSymptom);
             alert(
               `💊 약 추천: ${out.otc.join(", ") || "없음"}
 🏥 진료과: ${out.dept.join(", ") || "없음"}
