@@ -441,8 +441,14 @@ export default function LfaAnalyzer() {
         workerRef.current?.removeEventListener("message", handler);
         resolve(ev.data);
       };
-      workerRef.current.addEventListener("message", handler);
-      workerRef.current.postMessage({ bitmap }, [bitmap]);
+      if (!workerRef.current) {
+  setBusy(false);
+  return;
+}
+
+workerRef.current.addEventListener("message", handler);
+workerRef.current.postMessage({ bitmap }, [bitmap]);
+
     });
 
     if (res.ok) setResult(res.result);
