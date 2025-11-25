@@ -262,90 +262,93 @@ self.onmessage = async (ev) => {
     const img = ctx.getImageData(0, 0, width, height);
     const data = img.data;
 
-    const mask = new Uint8Array(width * height);
+    // 1️⃣ 가로 방향 프로필 생성 (x축으로 peak 찾기)
+    const prof = new Array(width).fill(0);
 
-    // RGB → HSV로 붉은 픽셀 마스크
-    for (let i = 0; i < width * height; i++) {
-      const r = data[i*4] / 255;
-      const g = data[i*4+1] / 255;
-      const b = data[i*4+2] / 255;
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let count = 0;
 
-      const mx = Math.max(r,g,b);
-      const mn = Math.min(r,g,b);
-      const d = mx - mn;
+      for (let y = 0; y < height; y++) {
+        const i = (y * width + x) * 4;
+        const r = data[i] / 255;
+        const g = data[i + 1] / 255;
+        const b = data[i + 2] / 255;
 
-      let h = 0;
-      if (d !== 0) {
-        if (mx === r) h = ((g-b)/d) % 6;
-        else if (mx === g) h = (b-r)/d + 2;
-        else h = (r-g)/d + 4;
+        const maxv = Math.max(r, g, b);
+        const minv = Math.min(r, g, b);
+        const diff = maxv - minv;
+
+        let h = 0;
+        if (diff !== 0) {
+          if (maxv === r) h = ((g - b) / diff) % 6;
+          else if (maxv === g) h = (b - r) / diff + 2;
+          else h = (r - g) / diff + 4;
+        }
+        h = (h * 60 + 360) % 360;
+
+        const s = maxv === 0 ? 0 : diff / maxv;
+        const v = maxv;
+
+        // 빨간색 선만 잡음
+        if ((h < 25 || h > 330) && s > 0.35 && v > 0.25) {
+          sum += v;
+          count++;
+        }
       }
-      h = (h*60+360) % 360;
+      prof[x] = count ? sum / count : 0;
+    }
 
-      const s = mx === 0 ? 0 : d/mx;
-      const v = mx;
-
-      if ((h < 25 || h > 330) && s > 0.35 && v > 0.25) {
-        mask[i] = 1;
+    // 2️⃣ peak 3개 찾기
+    const peaks = [];
+    for (let x = 2; x < width - 2; x++) {
+      const v = prof[x];
+      if (v > prof[x - 1] && v > prof[x + 1] && v > 0.05) {
+        peaks.push({ x, v });
       }
     }
 
-    // 🔥 가로형 3라인 → x축 3등분
-    const C_area = [0, width * 0.33];
-    const M_area = [width * 0.33, width * 0.66];
-    const E_area = [width * 0.66, width];
+    if (peaks.length < 1)
+      return self.postMessage({ ok: false, reason: "no-lines" });
 
-    let C_red = 0, M_red = 0, E_red = 0;
+    peaks.sort((a, b) => a.x - b.x);
 
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        if (!mask[idx]) continue;
+    // 3️⃣ 가장 강한 3개 peak만 선택
+    const strong = peaks
+      .sort((a, b) => b.v - a.v)
+      .slice(0, 3)
+      .sort((a, b) => a.x - b.x);
 
-        if (x >= C_area[0] && x < C_area[1]) C_red++;
-        else if (x >= M_area[0] && x < M_area[1]) M_red++;
-        else if (x >= E_area[0] && x < E_area[1]) E_red++;
-      }
-    }
+    const C = strong[0] || null;
+    const M = strong[1] || null;
+    const E = strong[2] || null;
 
-    // 각 영역이 실제로 라인인지 threshold 기반 판단
-    const TH = 150;  // 필요하면 조절 가능
-
-    const C_ok = C_red > TH;
-    const mpo = M_red > TH;
-    const ecp = E_red > TH;
-
-    if (!C_ok) {
-      self.postMessage({ ok:false, reason:"control-missing" });
-      return;
-    }
-
-    const diagnosis =
-      mpo && ecp ? "mixed" :
-      mpo ? "bacterial" :
-      ecp ? "allergic" :
-      "none";
-
-    const verdict = (mpo || ecp) ? "Positive" : "Negative";
+    const mpo = !!M;
+    const ecp = !!E;
 
     self.postMessage({
       ok: true,
       result: {
-        verdict,
-        detail: \`C=\${C_ok} | MPO=\${mpo} | ECP=\${ecp}\`,
+        verdict: mpo || ecp ? "Positive" : "Negative",
+        detail: \`C=\${!!C} | MPO=\${mpo} | ECP=\${ecp}\`,
         confidence: "확실",
-        diagnosis,
+        diagnosis:
+          mpo && ecp ? "mixed" :
+          mpo ? "bacterial" :
+          ecp ? "allergic" :
+          "none",
         mpoPositive: mpo,
         ecpPositive: ecp
       }
     });
 
   } catch (e) {
-    self.postMessage({ ok:false, reason:"worker-error" });
+    self.postMessage({ ok: false, reason: "worker-error" });
   }
 };
 `;
-return URL.createObjectURL(new Blob([src], {type: "application/javascript"}));
+
+  return URL.createObjectURL(new Blob([src], { type: "application/javascript" }));
 }
 
 /* ---------------------------------------------------------------------
