@@ -152,25 +152,30 @@ function analyzeCrop(canvas: HTMLCanvasElement, rect: CropRect): AnalyzeOut {
 
   // 🔥 세로줄 탐지: col-wise 최소/최대 밝기 차이
   const detectVertical = (xStart: number, xEnd: number) => {
-    let minCol = Infinity;
-    let maxCol = -Infinity;
+  let minCol = Infinity;
+  let maxCol = -Infinity;
 
-    for (let col = xStart; col < xEnd; col++) {
-      let colSum = 0;
-      for (let row = 0; row < h; row++) {
-        const i = (row * w + col) * 4;
-        const r = d[i], g = d[i + 1], b = d[i + 2];
-        const gray = r * 0.3 + g * 0.59 + b * 0.11;
-        colSum += gray;
-      }
-      const avg = colSum / h;
-      minCol = Math.min(minCol, avg);
-      maxCol = Math.max(maxCol, avg);
+  for (let col = xStart; col < xEnd; col++) {
+    let colSum = 0;
+    for (let row = 0; row < h; row++) {
+      const i = (row * w + col) * 4;
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const gray = r * 0.3 + g * 0.59 + b * 0.11;
+      colSum += gray;
     }
+    const avg = colSum / h;
+    minCol = Math.min(minCol, avg);
+    maxCol = Math.max(maxCol, avg);
+  }
 
-    // 세로줄 대비 threshold
-    return maxCol - minCol > 14;
-  };
+  const diff = maxCol - minCol;
+
+  // 🔥 자동 문턱값 — 전체 밝기 대비로 계산
+  const dynamicThreshold = Math.max(6, (maxCol + minCol) * 0.05);
+
+  return diff > dynamicThreshold;
+};
+
 
   const Cdet = detectVertical(0, zoneW);
   const Mdet = detectVertical(zoneW, zoneW * 2);
