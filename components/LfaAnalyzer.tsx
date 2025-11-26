@@ -222,10 +222,10 @@ function analyzeCrop(
     return hit / tot;
   };
 
-  const C = detectLineZone(0, zoneW);
-  const M = detectLineZone(zoneW, zoneW * 2);
-  const E = detectLineZone(zoneW * 2, zoneW * 3);
-
+ const E = detectLineZone(0, zoneW);            // 왼쪽 → ECP
+ const M = detectLineZone(zoneW, zoneW * 2);    // 가운데 → MPO
+ const C = detectLineZone(zoneW * 2, zoneW * 3); // 오른쪽 → Control
+ 
   const Cdet = C > 0.003;
   const Mdet = M > 0.0025;
   const Edet = E > 0.0025;
